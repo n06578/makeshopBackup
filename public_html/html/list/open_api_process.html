@@ -1,0 +1,45 @@
+<?
+/*
+    외부 연동 API 제공
+
+    ************* 규약 *******************
+    - mode, type은 method 를 GET 으로 고정
+    - 모든 리턴값은 json으로 보내준다.
+
+    MODE : save
+    - 모든 데이터는 datas 파라미터로 받는다. (array, method : POST)
+    - 각 배열 항목별로 result를 주며, result는 다음과 같다. 성공 : true, 실패 : false  (string)
+    - 각 배열 항목별로 message 메세지를 넘겨준다.
+    - return 할때 항목별로 base64_encode를 하지 않는다.
+    **************************************
+
+    open_api.html 파일은 조회 기능이 중점으로 PSR 규격에 따라 UTF-8 방식으로 개발되었지만,
+    등록 / 수정을 관리하는 파일에서는 SMS 발송 처리 기존 기능 활용을 위해 EUC-KR 방식으로 개발
+*/
+set_time_limit(120); // api3 기준으로 설정함
+ini_set("memory_limit",-1);
+header("Content-Type:application/json;charset=UTF-8");
+
+require_once realpath($_SERVER['DOCUMENT_ROOT']."/../conf")."/local.env.html";
+require_once $_ENV['PATH_FUNC']."/load_extension.func.html";
+require_once $_ENV['PATH_FUNC']."/get_etctype.func.html";
+require_once $_ENV['PATH_FUNC']."/get_premium_info.func.html";
+require_once $_ENV['PATH_LIB'].'/serialize_lib.html';
+require_once $_ENV['PATH_LIB'].'/admin.lib.html';
+require_once $_ENV['PATH_LIB'].'/adminuser_special.lib.html';
+require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.lib.html';
+require_once $_ENV['PATH_LIB'].'/openapi/openapi.lib.html'; // openapi.auth 파일에서 상속 받기 때문에 호출
+require_once $_ENV['PATH_LIB'].'/openapi/openapi.auth.lib.html';
+
+load_extension("json");
+$localdb = @get_db_connection('premium');
+$apiProc = new OpenApiProcess();
+$apiProc->setApiAuth(new OpenApiAuth($apiProc->getAdminuser()));
+
+// savelogs() 함수에서 $db 변수를 global 로 호출하기 때문에 변수 정의함
+$db = ($db) ? $db : $apiProc->getAdminuser();
+
+$result = $apiProc->submit();
+echo json_encode($result);
+unset($result);
+exit;

@@ -1,0 +1,749 @@
+<?php
+require_once $_ENV['PATH_FUNC'].'/xss_replace.func.html';
+require_once "{$_ENV['PATH_LIB']}/str.lib.html";
+class OpenApiProcess {
+    var $adminuser = '';
+    var $localdb = null;
+    var $slavedb = null;
+    var $selectdb = null;
+    var $apiAuth;
+    var $apiCountParams = Array();
+    var $order_manager;
+
+    function OpenApiProcess() {
+        $this->__construct();
+    }
+
+    function __construct() {
+        $this->localdb = get_db_connection('premium');
+        $this->common();
+    }
+
+    function setAdminuser($adminuser) {
+        $this->adminuser = $adminuser;
+    }
+
+    function getAdminuser() {
+        return $this->adminuser;
+    }
+
+    function setApiAuth($apiAuth) {
+        $this->apiAuth = $apiAuth;
+    }
+
+    function setApiCountParams($params) {
+        $this->apiCountParams = $params;
+    }
+
+    function ApiCountParams() {
+        return $this->apiCountParams;
+    }
+
+    function setSelectDB() {
+        if (is_resource($this->slavedb)) {
+            $this->selectdb = $this->slavedb;
+        } else {
+            $this->selectdb = $this->localdb;
+        }
+    }
+
+    function setDbObj($localdb, $slavedb = null) 
+    {
+        if (is_resource($slavedb)) {
+            $this->selectdb = $slavedb;
+        } else {
+            $this->selectdb = $localdb;
+        }
+        $this->localdb = $localdb;
+    }
+
+    function getPostInput($key) {
+        return isset($_POST[$key]) ? $_POST[$key] : null;
+    }
+
+    function getInput($key) {
+        return isset($_GET[$key]) ? $_GET[$key] : null;
+    }
+
+    function setDatas($params) {}
+
+    function commonValidate() 
+    {
+        return true;
+    }
+
+    function slaveDB($slaveIP) {
+        if (strlen($slaveIP)>0) {
+            if(strpos(" ".$slaveIP,".")>0) $slavehost = $slaveIP;
+            else  $slavehost = "$slaveIP.makeshop.co.kr";
+            $_ENV['DB_PROFILE']['slavedb'] =
+                array(
+                    'host'     => $slavehost,
+                    'user'     => 'makeshop',
+                    'pass'     => 'merong03',
+                    'database' => 'makeshop'
+                    );
+            $this->slavedb = @get_db_connection('slavedb');
+        }
+    }
+
+    function designTemplate($aAdminuser) {
+        set_makeshop_env('IS_UNIFY_OPT', false); // 통합옵션 여부
+        if ($aAdminuser['template_type'] == 'd3') {
+            if (PremiumInfo::get_order_manager($this->adminuser, $this->localdb) == 'oo' && AdminuserSpecial::use_unify_option($this->adminuser, $aAdminuser['joindate'])) {
+                set_makeshop_env('IS_UNIFY_OPT', true);
+            }
+        }
+    }
+
+    function allowchk($params) {
+        return $this->apiAuth->allowchk($params);
+    }
+
+    function searchUrlAdminuser($url) {
+        $sql = "SELECT SQL_CACHE * FROM `adminuser` WHERE `shopurl` = '{$url}' OR `shopurl` = 'www.{$url}'";
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    function common() {
+        $url = str_replace(":88","",getenv("HTTP_HOST"));
+        $aAdminuser = $this->searchUrlAdminuser($url);
+
+        // 멀티도메인 체크
+        if (strlen($aAdminuser['id']) === 0) {
+            $urls = explode(".", $url);
+            $aAdminuser = $this->searchUrlAdminuser($urls[0]);
+        }
+        $this->setAdminuser($aAdminuser['id']);
+        $this->slaveDB($aAdminuser['slaveIP']);
+        $this->setSelectDB();
+        $this->designTemplate($aAdminuser);
+    }
+
+    function authAllowCheck() {
+        $now = date('Y-m-d H:i:s');
+        // 정상적인 접속인지 확인
+        $allowChkParams = $_GET;
+        $allowChkParams['mode'] = "save";
+        $return_code = $this->allowchk($allowChkParams);
+
+        // API 카운트 증가
+        $params = Array(
+            'uid'           => $this->apiAuth->licenseInfo['id'],
+            'params'        => json_encode($_GET),
+            'api_type'      => $this->apiAuth->saveAuthTypeFor($_GET['type'], $_GET['process']),
+            'start_date'    => $now,
+            'reg_date'      => $now
+        );
+        $this->setApiCountParams($params);
+
+        if (strlen($return_code) > 0) {
+            $params['return_code'] = $return_code;
+            $this->insertApiCount($params);
+        }
+        return $params;
+    }
+
+    function submit() {
+        $allowParams = $this->authAllowCheck();
+        if ($allowParams['return_code']) {
+            return Array(
+                'return_code'   => $allowParams['return_code'],
+            );
+        }
+        $factory = $this->createStoreFactory($this->getInput('type'), $this->getInput('process'));
+        if (is_object($factory) === false) {
+            return Array(
+                'return_code' => '9104',
+            );
+        } 
+        $factory->setDbObj($this->localdb, $this->slavedb);
+        $factory->setProcess($this->getInput('process'));
+        $factory->setDatas($this->getPostInput('datas'));
+        $validate = $factory->commonValidate();
+        $apiCountParams = $this->ApiCountParams();
+        if ($validate !== true) {
+            $apiCountParams['return_code'] = $validate;
+            $this->insertApiCount($apiCountParams);
+            return Array(
+                'return_code'   => $apiCountParams['return_code'],
+            );
+        }
+        $result = $this->encodeUtf8($factory->save());
+        $apiCountParams['return_code'] = '0000';
+        $this->insertApiCount($apiCountParams);
+        $return = Array(
+            'return_code' => is_array($result['datas']['message']) === true ? '9999' : '0000',
+            'datas' => $result['datas'],
+        );
+        if (strlen($result['sms']) > 0) {
+            $return = array_merge($return, array('sms'=> $result['sms']));
+        }
+        return $return;
+    }
+
+    function createStoreFactory($type, $process) {
+        $license = $this->encodeEucKr($this->apiAuth->licenseInfo);
+        switch($type){
+            case 'order':
+                switch ($process) {
+                    case 'ready' :
+                    case 'invoice' :
+                    case 'invoice_change' :
+                    case 'delivery' :
+                    case 'delivery_complete' :
+                    case 'done' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.delivery.lib.html';
+                        return new OpenApiProcDelivery($this->adminuser, $license);
+                    case 'cancel' :
+                        //맘큐 전용 호출
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi_momq.proc.order_cancel.lib.html';
+                        return new OpenApiProcOrderCancel($this->adminuser, $license); 
+                    case 'refund' :
+                    case 'recall' :
+                    case 'recall_done' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.order_refund.lib.html';
+                        return new OpenApiProcOrderReturn($this->adminuser, $license); 
+                    case 'paid' :
+                        if ($this->get_order_manager() != 'oo') {
+                            require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.order_s1_status.lib.html';
+                            return new OpenApiProcOrderS1Status($this->adminuser, $license);
+                        }
+                    case 'rollback' :
+                    case 'pickup' :
+                    case 'trade_request' :
+                    case 'trade_receipt' :
+                    case 'trade_receipt_refusal' :
+                    case 'return_request' :
+                    case 'return_receipt' :
+                    case 'return_receipt_refusal' :
+                    case 'return_pickup' :
+                    case 'return_complete' :
+                    case 'cancel_done' :
+                    case 'cancel_request' :
+                    case 'basket_separated' :
+                    case 'hold' :
+                    case 'hold_cancel' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.order_status.lib.html';
+                        return new OpenApiProcOrderStatus($this->adminuser, $license); 
+                }
+                break;
+            case 'product':
+                switch ($process) {
+                    case 'stock' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.stock.lib.html';
+                        return new OpenApiProcStock($this->adminuser, $license);
+                    case 'create' : 
+                    case 'update' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.product.lib.html';
+                        $result = new OpenApiProcProduct($this->adminuser, $this->localdb);
+                        $result->setLicenses($this->apiAuth->licenseInfo);
+                        return $result;
+                    case 'delete' :
+                    case 'delete_temp' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.product_delete.lib.html';
+                        return new OpenApiProcProductDelete($this->adminuser, $license);
+                }
+                break;
+            case 'coupon':
+                switch ($process) {
+                    case 'give' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.coupon_give.lib.html';
+                        return new OpenApiProcCouponGive($this->adminuser, $license);
+                }
+                break;
+            case 'review':
+                switch ($process) {
+                    case 'store' :
+                    case 'delete' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.review.lib.html';
+                        return new OpenApiProcReview($this->adminuser, $license);
+                }
+                break;
+
+            /* 유한 - 오늘 플러스 요청 기능 */
+            case 'cart':
+                switch ($process) {
+                    case 'create' :
+                    case 'delete' :
+                    case 'buy' :
+                    case 'update' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.cart.lib.html';
+                        return new OpenApiProcCart($this->adminuser, $license);
+                    break;
+                    case 'login' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.cart_login.lib.html';
+                        return new OpenApiProcCartLogin($this->adminuser, $license);
+                    break;
+                }
+                break;
+            case 'board_custom':
+                switch ($process) {
+                    case 'store' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.board_custom.lib.html';
+                        return new OpenApiProcBoardCustom($this->adminuser, $license);
+                }
+                break;
+            /* 오늘 플러스 요청 기능 */
+
+            case 'board':
+                switch ($process) {
+                    case 'store' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.board.lib.html';
+                        return new OpenApiProcBoard($this->adminuser, $license);
+                }
+                break;
+            case 'comment':
+                switch ($process) {
+                    case 'store' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.comment.lib.html';
+                        return new OpenApiProcComment($this->adminuser, $license);
+                }
+                break;
+            case 'reserve':
+                switch ($process) {
+                    case 'give' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.reserve.lib.html';
+                        return new OpenApiProcReserveGive($this->adminuser, $license);
+                }
+                break;
+            case 'reserve_temp':
+                switch ($process) {
+                    case 'give' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.reserve_temp.lib.html';
+                        return new OpenApiProcReserveTempGive($this->adminuser, $license);
+                }
+                break;
+            case 'point':
+                switch ($process) {
+                    case 'give' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.point.lib.html';
+                        return new OpenApiProcPointGive($this->adminuser, $license);
+                }
+                break;
+            case 'order_memo':
+                switch ($process) {
+                    case 'create' :
+                    case 'update' :
+                    case 'delete' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.order_memo.lib.html';
+                        return new openApiProcOrderMemo($this->adminuser, $license);
+                }
+                break;
+            case 'brand':
+                switch ($process) {
+                    case 'create' :
+                    case 'update' :
+                    case 'delete' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.brand.lib.html';
+                        return new openApiProcBrand($this->adminuser, $license);
+                }
+                break;
+            case 'user_group_change':
+                    require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.user_group_change.lib.html';
+                    return new openApiProcUserGroupChange($this->adminuser, $license);
+                break;
+            case 'smart_coupon':
+                switch ($process) {
+                    case 'give' :
+                    case 'use' :
+                    case 'again' : // 사용된 스마트 쿠폰 재발급(철회)
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.smart_coupon.lib.html';
+                        return new OpenApiProcSmartCoupon($this->adminuser, $license);
+                }
+                break;
+            case 'push':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.push.lib.html';
+                return new OpenApiProcPush($this->adminuser, $license);
+                break;
+            case 'user':
+                switch ($process) {
+                    case 'refund_bank' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.user_refund.lib.html';
+                        return new openApiProcUserRefund($this->adminuser, $license);
+                    case 'agree' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.user_agree.lib.html';
+                        return new openApiProcUserAgree($this->adminuser, $license);
+                }
+            break;
+            case 'product_neogift':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.product_neogift.lib.html';
+                return new OpenApiProcProductNeogift($this->adminuser, $license);
+                break;
+            case 'subs_config':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.subs_config.lib.html';
+                return new OpenApiProcSubsConfig($this->adminuser, $license);
+                break;
+            case 'user_counsel':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.user_counsel.lib.html';
+                return new OpenApiProcUserCounsel($this->adminuser, $license);
+                break;
+            case 'provider':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.provider.lib.html';
+                return new OpenApiProcProvider($this->adminuser, $license);
+                break;
+            case 'send_sms':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.send_sms.lib.html';
+                return new OpenApiProcSendSms($this->adminuser, $license);
+                break;
+            case 'cart_free_config':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.cart_free_config.lib.html';
+                return new OpenApiProcCartFreeConfig($this->adminuser, $license);
+                break;
+            case 'webhook_service':
+                switch ($process) {
+                    case 'update' :
+                        require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.webhook.lib.html';
+                        return new openApiProcWebhook($this->adminuser, $license);
+                }
+            break;
+            case 'provider_sub_admin':
+                    require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.provider_sub_admin.lib.html';
+                    return new OpenApiProcProviderSubAdmin($this->adminuser, $license);
+            break;
+            case 'order_delivery_change':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.order_delivery_change.lib.html';
+                return new OpenApiProcOrderDeliveryChange($this->adminuser, $license);
+            break;
+            case 'product_seo':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.product_seo.lib.html';
+                return new OpenApiProcProductSeo($this->adminuser, $license);
+            case 'naverpay':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.naverpay.lib.html';
+                return new OpenApiProcNaverpay($this->adminuser, $license);
+            case 'kakaopay':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.kakaopay.lib.html';
+                return new OpenApiProcKakaopay($this->adminuser, $license);
+            case 'payco':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.payco.lib.html';
+                return new OpenApiProcPayco($this->adminuser, $license);
+            case 'user_smart_coupon':
+                //셀피아 전용 api
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi_sellpia.proc.user_smart_coupon.lib.html';
+                return new OpenApiProcUserSmartCoupon($this->adminuser, $license);
+            case 'page_min_image_size':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.page_min_image_size.lib.html';
+                return new OpenApiProcPageMinImageSize($this->adminuser, $license);
+            case 'social_apple':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.social_apple.lib.html';
+                return new OpenApiProcSocialApple($this->adminuser, $license);
+            case 'social_facebook':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.social_facebook.lib.html';
+                return new OpenApiProcSocialFacebook($this->adminuser, $license);
+            case 'social_kakao':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.social_kakao.lib.html';
+                return new OpenApiProcSocialKakao($this->adminuser, $license);
+            case 'social_naver':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.social_naver.lib.html';
+                return new OpenApiProcSocialNaver($this->adminuser, $license);
+            case 'product_display':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.product_display.lib.html';
+                return new OpenApiProcProductDisplay($this->adminuser, $license);
+            case 'page_seo':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.page_seo.lib.html';
+                return new OpenApiProcPageSeo($this->adminuser, $license);
+            case 'crm_board':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.crm_board.lib.html';
+                return new OpenApiProcCrmBoard($this->adminuser, $license);
+            case 'smart_reserve':
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.smart_reserve.lib.html';
+                return new OpenApiProcSmartReserve($this->adminuser, $license);
+            case 'category' :
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.category.lib.html';
+                return new OpenApiProcCategory($this->adminuser, $license);
+            case 'sellmate_offline_order' :
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.offline_order.lib.html';
+                return new OpenApiProcOfflineOrder($this->adminuser, $license); 
+            case 'sellmate_offline_order_status' :
+                require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.offline_order_status.lib.html';
+                return new OpenApiProcOfflineOrderStatus($this->adminuser, $license); 
+        }
+    }
+
+    function encodeEucKr($params) {
+        if (is_array($params)) {
+            foreach($params as $key => $value){
+                if (isset($value) && is_array($value)) {
+                    $result[$key] = $this->encodeEucKr($value);
+                } else if (strlen($value) > 0) {
+                    if (is_string($value)) {
+                        $result[$key] = Str::convert_encoding($value, 'CP949', 'UTF-8');
+                    } else {
+                        $result[$key] = $value;
+                    }
+                }
+            }
+        } else {
+            $result = Str::convert_encoding($params, 'CP949', 'UTF-8');
+        }
+        return $result;
+    }
+
+    function encodeUtf8($params) {
+        if (is_array($params)) {
+            foreach($params as $key => $value){
+                if (is_array($value)) {
+                    $result[$key] = $this->encodeUtf8($value);
+                } else if (strlen($value) > 0) {
+                    if (is_string($value)) {
+                        $result[$key] = Str::convert_encoding($value, 'UTF-8', 'CP949');
+                    } else {
+                        $result[$key] = $value;
+                    }
+                } else if ($value === false) {
+                    $result[$key] = false;
+                }
+            }
+        } else {
+            $result = Str::convert_encoding($params, 'UTF-8', 'CP949');
+        }
+        return $result;
+    }
+
+    function replaceDateTime($date) {
+        if (strlen($date) === 14) {
+            $data = substr($date, 0, 4)."-".substr($date, 4, 2)."-".substr($date, 6, 2)." ".substr($date, 8, 2).":".substr($date, 10, 2).":".substr($date, 12, 2);
+        } else if (strlen($date) === 12) {
+            $data = substr($date, 0, 4)."-".substr($date, 4, 2)."-".substr($date, 6, 2)." ".substr($date, 8, 2).":".substr($date, 10, 2);
+        } else if (strlen($date) === 10) {
+            $data = substr($date, 0, 4)."-".substr($date, 4, 2)."-".substr($date, 6, 2)." ".substr($date, 8, 2);
+        }
+        return $data;
+    }
+
+    function escapeField($fields) {
+        $result = '';
+        foreach ((Array) $fields as $field => $data) {
+            $result .= (strlen($result) === 0) ? "" : ", ";
+            $result .= sprintf("`{$field}` = '%s'", mysql_real_escape_string($data));
+        }
+        return $result;
+    }
+
+    function arrayOnly($values, $keys) {
+        $result = Array();
+        foreach((Array) $values as $key => $value) {
+            if (in_array($key, $keys)) {
+                $result[$key] = $value;
+            }
+        }
+        return $result;
+    }
+
+    function insertApiCount($params) {
+        $api_type = $params['api_type'];
+        if ($api_type !== 'inq') {
+            $api_type = "save_".$api_type;   
+        }   
+        $sql = <<<SQL
+            INSERT INTO `open_api_count`
+               SET `adminuser` = '{$this->adminuser}'
+                 , `company_uid` = '{$params['uid']}'
+                 , `api_type` = '{$api_type}'
+                 , `return_code` = '{$params['return_code']}'
+                 , `start_date` = '{$params['start_date']}'
+                 , `reg_date` = '{$params['reg_date']}'
+                 , `params` = '{$params['params']}'
+SQL;
+        $res = query($sql, $this->localdb);
+    }
+
+    /**
+     * logTitle : 로그 제목
+     * logData : 저장내용
+     * filename : 저장할 파일명
+     * license : openapi 업체 정보
+     * @param array $params
+     * @return void
+     */
+    function saveLog($params)
+    {
+        require_once $_ENV['PATH_FUNC'].'/logs.func.html';
+        require_once $_ENV['PATH_FUNC'].'/file_save_log.func.html';
+
+        // json 은 한글은 UTF-8만 제공하기 때문에 에러메시지 저장이 안됨, 이에 따라 serialize로 로그 저장
+        $message = is_array($params['logData']) ? serialize($params['logData']) : $params['logData'];
+        $log = "업체 id : {$params['license']['id']}, 업체명 : {$params['license']['company_name']}, ip : {$_SERVER['REMOTE_ADDR']}, Data : {$message}";
+        savelogs("{$params['logTitle']} {$log}");
+        if (strlen($params['filename']) > 0) {
+            file_save_log("{$params['filename']}_".date('Ymd'), $log);
+        }
+    }
+
+    /**
+     * 로그 저장
+     * @param string $logkey
+     * @param string $content
+     * @return void
+     */
+    function update_logs($logkey, $content)
+    {
+        if (!empty($logkey) || !empty($content)) {
+            require_once $_ENV['PATH_FUNC'].'/logs.func.html';
+            updatelogs($logkey, $content);
+        }
+    }
+
+    function create_openapi_proc_log()
+    {
+        require_once $_ENV['PATH_LIB']."/openapi/openapi.proc.log.lib.html";
+        return new OpenapiProcLog($this->adminuser, $this->localdb);
+    }
+
+    function etcInformation()
+    {
+        $sql =<<<SQL
+            SELECT *
+                FROM `etc`
+                WHERE `adminuser`='{$this->adminuser}'
+
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row;
+    }
+
+    function arrayToWhereInQuery($param)
+    {
+        $result = array();
+        foreach ((array)$param as $val) {
+            $result[] ="'{$val}'";
+        }
+        return implode(", ", $result);
+    }
+
+    /**
+     * premium 테이블 조회
+     * @access protected
+     * @return array
+     */
+    function premium_info()
+    {
+        $sql =<<<SQL
+            SELECT * 
+            FROM `premium`
+            WHERE `adminuser`='{$this->adminuser}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    /**
+     * admniuser 테이블 조회
+     * @return array
+     */
+    function adminuser_info()
+    {
+        $sql =<<<SQL
+            SELECT * 
+            FROM `adminuser`
+            WHERE `id`='{$this->adminuser}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    /**
+     * sms 테이블 조회
+     * @return array
+     */
+    function sms_info()
+    {
+        $sql =<<<SQL
+            SELECT * 
+            FROM `sms`
+            WHERE `adminuser`='{$this->adminuser}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    /**
+     * 파일 업로드
+     * @param $file_path
+     * @param $content
+     * @return boolean
+     */
+    function save_file($file_path, $content)
+    {
+        if (!$target_file = fopen($file_path, "w")) {
+            //파일 오픈 실패
+            return false;
+        }
+        if (fwrite($target_file, $content) === false) {
+            //파일 쓰기 실패
+            return false;
+        }
+        fclose($target_file);
+        return true;
+    }
+
+    /**
+     * 유저 정보 취득
+     * @param string $userid
+     * @return array
+     */
+    function find_by_userid($userid)
+    {
+        $sql = <<<SQL
+        SELECT * FROM `user` WHERE `adminuser` = '{$this->adminuser}' AND `id` = '{$userid}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    /**
+     * 배열값을 구분자가 있는 문자열로 변경 
+     *
+     * @param [array] $param 문자열로 변경할 배열
+     * @param [string] $separator 배열을 연결할 구분자
+     * @param [string] $quote 배열 값 쿼터 추가 처리
+     * @return string
+     */
+    function array_convert_string($param, $separator = ",", $quote = "'")
+    {
+        $result = array();
+        if (!is_array($param)) {
+            return '';
+        }
+        foreach ($param as $val) {
+            $result[] = "{$quote}{$val}{$quote}";
+        }
+        return implode($separator, $result);
+    }
+
+    /**
+     * 스마트 적립금 사용 여부
+     *
+     * @return boolean
+     */
+    function is_smart_reserve_use()
+    {
+        if ($_ENV['IS_UNIFY_OPT'] && file_exists($_ENV['PATH_LIB']."/smart_reserve.lib.html")) {
+            require_once $_ENV['PATH_LIB']."/smart_reserve.lib.html";
+            $smart_reserve = new SmartReserve($this->adminuser, '');
+            $smart_reserve_config = $smart_reserve->get_application_data();
+            if (in_array($smart_reserve_config['smart_reserve_use'], array('Y', 'P'))) {
+                 return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * get_order_manager 
+     * 
+     * @desc : 주문 처리의 경우 주문 2.0을 기준으로 만들어져 있기 때문에, order_manager 값을 쓰지 않음.
+     * @desc : 주문 1.0을 사용하는 경우 order_manager 값을 사용하고, 값이 없을 경우 넣어줌.
+     */
+    function get_order_manager()
+    {
+        if (strlen($this->order_manager) < 1) {
+            $order_manager = PremiumInfo::get_order_manager($this->adminuser, $this->localdb);
+            $this->order_manager = $order_manager;
+        }
+        return $this->order_manager;
+    }
+
+}
