@@ -1,0 +1,851 @@
+<?php
+require_once $_ENV['PATH_LIB']."/serialize_lib.html";
+require_once $_ENV['PATH_LIB']."/associated_service.lib.html";
+
+class OpenApiAuth extends OpenApi {
+    var $admin_id = '';
+    var $localdb = null;
+    var $table = 'open_api_auth';
+    var $apiHost = 'openapi.makeshop.co.kr';
+    var $apiCheckTime = 0;
+    var $licenseInfo = Array();
+    var $webhook_use_company = Array();
+    var $exceptions = Array(
+        '6'     => 'ZDdmNTM2NjQ2ZjlkNjVjNWY4OWFiNzM2NjIzOGQ3YjI=', // ?��?��리언?��
+        '20'    => 'YzkzOWY3MGE4MWJkMDAxMzc0ZjdhZWFlMWZjZjkxZDE=', // ?��?��?��
+        '116'   => 'MWFjYjUwMzhkYWRmYzFlMzFmNzU5OGZjMGMxM2E0NDk=', // 메이?��?��
+        '156'   => 'OGI4YmY2YThhMmFmNjIxNDI5YWMzYzU4ZGU3ZmJhOWI=', // ?��머스?��?��?��(?��?���??)
+        '301'   => 'OGRjNzEzYTNiMjk4NmMzZWZmMGE0YmVkNzBlYjYzNjY=', // ?��?��마켓
+        '151'   => 'NDUxMGU0YWZlMmE3NmZjMWFiNjcwZWRiNjExMjExZDU=', //phpschool
+        '319'   => 'OTY5OGQ2MGUwZGI5MDgzZmI5YTk2ZDYzODc2M2Q1OGY=', //마이?��?��
+        '420'   => 'MDBiZjgyZWJiNDFhOWY5ZTRiMmU1YzM0MTg3M2QyOGM=', //????��?��
+        '514'   => 'MDM2MzZkMzI1MWUxYzZkNmYyMmE0OTRhNDIxNmJlMDc=', //?��?���??
+        '517'   => 'NDcxOWY2NWUxMzQ1NDQ1ODk2Y2IxOTFlMDhjMjEzZDc=', //?��?���?? ?��?��?�� ?���?? 개발�??
+        '528'   => 'YzcyN2RjMWY4MGZjNjA3MmM3M2MyNWU2NzIxYTBhNGM=', // Vfinder
+        '530'   => 'NjVlNGUwOWQ4ZDQ0Yjc1MjAyNzZkZmUxNjUwNGRkN2Q=', // logs
+        '617'   => 'NTgyN2EyZTAzNzM0NjhjYmIzNTExMjhiMWNkM2FkOTc=',  // mailtail
+    );
+    var $zigzag = "ZTc5N2ZkZTYyODQyODRjYzE3MTNlNjYyZTc0N2EwZWI="; // �??그재�??
+    var $momq_list = array(
+	    "ZjQ3ZTk2ZGIyNTlmN2RmMWUyNzY4Mjg2MzVjOWQ4YjI=" => array(
+		'112.214.72.123',
+		'14.129.64.12', //jin2
+		'52.231.32.120', // ?��?��?��?��?��
+		'52.231.32.121', // ?��?��?��?��?��
+		'52.231.32.122', // ?��?��?��?��?��
+		'52.231.32.123', // ?��?��?��?��?��
+		'52.231.32.124', // ?��?��?��?��?��
+		'210.217.16.111',
+		'52.231.77.58', // today plus start
+		'52.231.73.183',
+		'52.231.71.204',
+		'52.231.66.104',
+		'52.231.77.171',
+		'52.231.200.179',
+		'52.231.200.180',
+		'52.231.200.181',
+		'52.231.200.182',
+		'52.231.69.238',
+		'52.231.78.172',
+		'52.231.69.251',
+		'52.231.153.175',
+		'52.231.164.160',
+		'52.231.195.85',
+		'52.231.195.86',
+		'52.231.195.129',
+		'52.231.200.179',
+		'52.231.146.96',
+		'52.231.200.183', // today plus end
+	    )
+	);
+    var $mycallObj;
+    var $assObj;
+    var $webhookAccess = array(
+        'webhook_auth_list',
+        'webhook_service'
+    );
+
+    function OpenApiAuth($admin_id) {
+        $this->__construct($admin_id);
+    }
+
+    function __construct($admin_id) {
+        $this->admin_id = $admin_id;
+        $this->adminuser = $admin_id;
+        $this->localdb = get_db_connection('premium');
+        $this->apiCheckTime = 60 * 2;
+        $this->assObj = new AssociatedService($this->admin_id);
+    }
+
+    function setMycallObj() {
+        $this->mycallObj = new mycall();
+        $this->mycallObj->host        = $this->apiHost;
+        $this->mycallObj->script_name = "/api/licenses/";
+        $this->mycallObj->method      = "POST";
+        $this->mycallObj->ssl          = true;
+    }
+
+    function setLicenseInfo($licenseInfo) {
+        $this->licenseInfo = $licenseInfo;
+    }
+
+    function licenseInfo() {
+        return $this->licenseInfo;
+    }
+
+    function setScriptName($url) {
+        $this->mycallObj->script_name = $url;
+    }
+
+    function createShopKey() {
+        return md5($this->admin_id."_".date('YmdHis')."_".rand(1000, 9999));
+    }
+
+    function getSecretKey() {
+        return md5(date('Ymd')."_open_api");
+    }
+
+    function solution() {
+       switch ($this->licenseInfo['id']) {
+            case '420' :
+                return 'sellpia';
+       }
+       return '';
+    }
+
+    function allowChk($params) {
+        //기간만료체크
+        if ($this->isMakeshopEnabled() === false) {
+            return '9998';
+        }
+        $headers = $this->getRequestHeaders();
+        $shop_key = $headers['Shopkey'];
+        $license_key = $headers['Licensekey'];
+        $process = $this->getInput('process');
+
+        if (!$params['mode']) {
+            return '9000';
+        }
+        if ($params['mode'] === 'save') {
+            $authType = $this->saveAuthTypeFor($params['type'], $params['process']);
+        } else {
+            $authType = $this->inquiryAuthTypeFor($params['type']);
+        }
+
+        // ?��?��?��?�� ?��보�?? �?? �???��?���?? ?��?�� �???��?�� ?�� ?��?���?? 처리
+        $licenseList = $this->licenseKey();
+        if (count($licenseList) == 0) {
+            for ($i=0; $i<5; $i++) {
+                $licenseList = $this->licenseKey(true);
+                if (count($licenseList) > 0) {
+                    break;
+                }
+            }
+        }
+
+        if ($params['type'] === 'authority' && strlen($shop_key) < 1) {
+            $open_api_auth =  $this->getOpenApiAuthInfo(array('company_uid' => $this->licesense_company_uid($licenseList, $license_key)));
+            if (isset($open_api_auth['shop_key'])) {
+                $shop_key = $_SERVER['HTTP_Shopkey'] = $open_api_auth['shop_key'];
+            }
+        }
+
+        if (in_array($params['type'], $this->webhookAccess)) {
+            return;
+        }
+    
+        //맘큐 ?���?? 처리
+        if (count($this->momq_list[$license_key]) > 0) {
+           return $this->exceptionMomq($license_key);
+        }
+
+        // ?��?��리언?��?�� 경우 무조�?? ?��?�� (?��?��?��)
+        $this->exceptionLicenses($licenseList, $license_key);
+        $licenseInfo = $this->licenseInfo();
+        if (strlen($licenseInfo['id']) > 0) {
+            if ($this->getOpenApiCount($licenseInfo['id'], date('Y-m-d H'), $params['mode']) > $licenseInfo['api_count']) {
+                return '9006';
+            }
+            return;
+        }
+
+        if (!$shop_key) {
+			return '9001';
+        } else {
+            // 받�?? ?��?��?���?? ?��?�� ?���?? 조회
+            $shopAuthInfo = $this->getOpenApiAuthInfo(Array(
+                'shop_key'  => $shop_key,
+            ));
+            if (!is_array($shopAuthInfo)) {
+                return '9002';
+            }
+        }
+        if (!in_array($license_key, $this->assObj->auto_openapi_companies('licensekey'))) {
+            $result = $this->agreeCheck();
+        }
+        if (strlen($result) > 0) return $result;
+
+        // 코리?��?��?��?��?�� 발행?�� ?��?��?��?��?�� 체크
+        if (!$license_key) {
+            return '9003';
+        } else {
+            $licenseInfo = $this->setLicenses($licenseList, $license_key, $shopAuthInfo['company_uid']);
+            $result = $this->koreacenterAuthCheck($params['mode'], $authType);
+			return $licenseInfo;
+            if (strlen($result) > 0) return $result;
+        }
+
+        // api ?��?�� ?��?��?�� 체크
+        $result = $this->ipCheck();
+        if (strlen($result) > 0) return $result;
+        
+        $authInquiry = json_decode($shopAuthInfo['auth_inquiry'], 'array');
+        $authModify = json_decode($shopAuthInfo['auth_modify'], 'array');
+        // ?��?�� 권한 �???�� 체크
+        if ($authType !== 'except') {
+            switch ($params['mode']) {
+                case 'search' :
+                    // �??그재�?? ?��?�� 그룹 조회 ?��?�� 처리
+                    if ($this->zigzag === $license_key && $params['type'] === 'group') {
+                        return;
+                    }
+                    if ($authInquiry[$authType] !== 'Y' && $authType !== 'information') {
+                        return '9007';
+                    }
+                    break;
+                case 'save' :
+                    if ($authModify[$authType] !== 'Y') {
+                        return '9103';
+                    }
+                    break;
+            }
+        }
+        if ($this->is_unlimit_count($params['type'], $license_key)) {
+            return;
+        }
+        // api ?��?��?�� 체크
+        $apiCount = $this->getOpenApiCount($shopAuthInfo['company_uid'], date('Y-m-d H'), $params['mode'] === 'search' ? $params['mode'] : $authType);
+        if ($params['mode'] === 'save') {
+            if ($apiCount > $licenseInfo['api_modify_count'][$authType]) {
+                return '9006';
+            }
+        } else {
+            if ($apiCount > $licenseInfo['api_count']) {
+                return '9006';
+            }
+        }
+    }
+
+    function exceptionMomq($license)
+    {
+        if (!in_array($_SERVER['REMOTE_ADDR'], $this->momq_list[$license])){
+            return '9009';
+        }
+    }
+
+    function koreacenterAuthCheck($mode, $authType) {
+        $result = '';
+        $licenseInfo = $this->licenseInfo();
+		$result = $licenseInfo;
+        if (strlen($licenseInfo['id']) === 0) {
+            $result = '9004';
+        } else if ($licenseInfo['state'] !== 'ALLOW') {
+            $result = '9005';
+        } else {
+            $cocenAuthArr['inquiry'] = json_decode($licenseInfo['auth_inquiry'], 'array');
+            $cocenAuthArr['modify'] = $licenseInfo['auth_modify'];
+            if ($authType !== 'except') {
+                switch ($mode) {
+                    case 'search' :
+                        if ($cocenAuthArr['inquiry'][$authType] !== 'Y' && $authType !== 'information') {
+                            $result = '9008';
+                        }
+                        break;
+                    case 'save' :
+                        if ($cocenAuthArr['modify'][$authType] !== 'Y') {
+                            $result = '9104';
+                        }
+                        break;
+                    default:
+                        $result = '9999';
+                        break;
+                }
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * error log file
+     *
+     * @param string $error_code
+     * @return void
+     */
+    function error_log($error_code)
+    {
+        $headers = $this->getRequestHeaders();
+        $shop_key = $headers['Shopkey'];
+        $license_key = $headers['Licensekey'];
+        $this->saveLog("openapi_auth", "{$error_code} error admin_id : {$this->admin_id}, request_shop_key : {$shop_key}, request_license_key : {$license_key}");
+    }
+
+    function setLicenses($licenseList, $license_key, $company_uid) {
+        $count = count($licenseList);
+        for($i=0; $i<$count; $i++){
+            if ($licenseList[$i]['license_key'] === trim($license_key) && $company_uid == $licenseList[$i]['id']) {
+				$check .= $licenseList[$i];
+                $this->setLicenseInfo($licenseList[$i]);
+                break;
+            }
+        }
+		return $check;
+        return $this->licenseInfo();
+    }
+
+    function ipCheck() {
+        $licenseInfo = $this->licenseInfo();
+        $result = '';
+        if (strlen($licenseInfo['allow_ips']) > 0) {
+            $allowIpArr = explode(",", $licenseInfo['allow_ips']);
+            $allowIpCheck = false;
+            if (is_array($allowIpArr)) {
+                foreach($allowIpArr as $ip){
+                    $ip = trim($ip);
+                    $ipLen = strlen($ip);
+                    if (substr($_SERVER['REMOTE_ADDR'], 0, $ipLen) === $ip) {
+                        $allowIpCheck = true;
+                    }
+                }
+            }
+            if ($allowIpCheck === false) {
+                $result = '9009';
+            }
+        }
+        return $result;
+    }
+
+    function agreeCheck() {
+        $result = '';
+        $maObj = new MakeshopAdmin($this->admin_id);
+        $openApiArr = $maObj->get_adminuser_config('open_api');
+        $openApis = Array();
+        if ($openApiArr['open_api']) {
+            $openApis = json_decode($openApiArr['open_api'], 'array');
+        }
+        if ($openApis['service_agree'] !== 'Y') {
+            $result = '9101';
+        } else if ($openApis['supply_agree'] !== 'Y') {
+            $result = '9102';
+        }
+        return $result;
+    }
+
+    function exceptionLicenses($licenseList, $license_key) {
+        if (in_array($license_key, $this->exceptions)) {
+            $count = count($licenseList);
+            for($i=0; $i<$count; $i++){
+                if ($licenseList[$i]['license_key'] === trim($license_key)) {
+                    $this->setLicenseInfo($licenseList[$i]);
+                    break;
+                }
+            }
+        }
+    }
+
+    function inquiryAuthTypeFor($type) {
+        switch($type){
+            case 'category':
+            case 'discount':
+            case 'provider':
+            case 'provider_settlement':
+            case 'stock':
+            case 'delete_product':
+            case 'product_seo':
+            case 'icon':
+            case 'main_display':
+            case 'brand':
+            case 'product_notice':
+            case 'product_size_chart':
+            case 'brand_product':
+            case 'plan':
+            case 'subs_product':
+            case 'rental_product':
+            case 'product_package_item':
+            case 'cart_free':
+            case 'add_composition_product':
+            case 'category_display_products':
+            case 'keyword_rank':
+                $result = "product";
+                break;
+            case 'board_code':
+            case 'crm_board':
+            case 'review':
+            case 'board_custom':
+            case 'board_custom_category' :
+            case 'comment':
+                $result = "board";
+                break;
+            case 'cart':
+            case 'device_cart_count':
+            case 'user_coupon':
+            case 'user_smart_coupon':
+            case 'user_smart_coupon_discount':
+            case 'user_exit':
+            case 'user_exit_log':
+            case 'user_reserve':
+            case 'user_point' :
+            case 'user_emoney' :
+            case 'user_auto_group' :
+            case 'user_group_change_log' :
+            case 'smart_coupon':
+            case 'smart_coupon_download':
+            case 'coupon':
+            case 'group':
+            case 'recommend' :
+            case 'recommend_list' :
+            case 'wishlist' :
+            case 'user_counsel' :
+            case 'user_dormant' :
+            case 'user_order' :
+            case 'user_dormant_wait' :
+            case 'user_smart_reserve' :
+            case 'smart_reserve':
+                $result = "user";
+                break;
+            case 'information':
+            case 'order_log':
+            case 'sales':
+            case 'subs':
+            case 'order_memo':
+            case 'order_delivery':
+            case 'order_search':
+            case 'cash_bill':
+            case 'order_trade_log':
+            case 'present_order':
+            case 'order_return_invoice':
+            case 'order_return_delivery': // ȸ��������ȸ 250416 cjh93
+                $result = "order";
+                break;
+            case 'provider_sub_admin':
+            case 'bank_account':
+            case 'naverpay':
+            case 'kakaopay':
+            case 'payco':
+            case 'smart_coupon_config':
+            case 'smart_reserve_config':
+            case 'crm_board_config':    
+            case 'sms_config':    
+            case 'page_min_image_size' :
+            case 'social_apple' :
+            case 'social_facebook' :
+            case 'social_kakao' :
+            case 'sub_admin' :
+            case 'social_naver' :
+            case 'product_neogift':
+            case 'order_config':
+            case 'page':
+            case 'page_seo':
+            case 'main_display_code':
+            case 'subs_config':
+            case 'privacy' :
+            case 'cart_free_config':
+            case 'board_review_config':
+            case 'smart_pickup_store':
+            case 'malltail_global_config':
+                $result = "setting";
+                break;
+            case 'delivery_company' :
+            case 'authority':
+                $result = "except"; 
+                break;
+            default :
+                $result = $type;
+                break;
+        }
+        return $result;
+    }
+
+    function saveAuthTypeFor($type, $process) {
+        switch($type){
+            case 'smart_coupon':
+            case 'coupon':
+                if (in_array($process, array('give', 'use', 'again'))) {
+                    $result = "coupon_give";
+                }
+                break;
+            case 'point' :
+            case 'reserve':
+            case 'reserve_temp':
+            case 'smart_reserve':
+                if ($process) {
+                    $result = "reserve_{$process}";
+                }
+                break;
+            case 'comment':
+            case 'review' :
+            case 'board_custom' :
+            case 'crm_board' :
+                $result = "board";
+                break;
+            case 'cart'  :
+            case 'order' :
+            case 'mypage' :
+            case 'order_memo' :
+            case 'order_delivery_change' :
+                $result = "order";
+                break;
+            case 'brand':
+            case 'product' :
+            case 'product_display' :
+            case 'product_seo' :
+            case 'provider':
+            case 'category':
+                $result = "product";
+                break;
+            case 'board' :
+                $result = $type;
+                break;
+            case 'naverpay' :
+            case 'kakaopay' :
+            case 'payco' :
+            case 'page_min_image_size' :
+            case 'social_apple' :
+            case 'social_facebook' :
+            case 'social_kakao' :
+            case 'social_naver' :
+            case 'product_neogift':
+            case 'page_seo':
+            case 'subs_config':
+            case 'provider_sub_admin':
+            case 'cart_free_config':
+                $result = 'setting';
+                break;
+            case 'user' :
+            case 'user_smart_coupon' :
+            case 'user_group_change' :
+            case 'user_counsel' :
+            case 'send_sms' :
+            case 'group' :
+                $result = 'user';
+                break;
+            case 'sellmate_offline_order' :
+            case 'sellmate_offline_order_status' :
+                $headers = $this->getRequestHeaders();
+                $result = $this->is_sellmate($headers['Licensekey']) ? 'order' : '';
+                break;
+        }
+        return $result;
+    }
+
+    function createOpenApiAuth($params) {
+        $add_set = '';
+        if (isset($params['auth_inquiry'])) {
+            $add_set = ", `auth_inquiry` = '".json_encode($params['auth_inquiry'])."'";
+        }
+        $sql = <<<SQL
+            INSERT INTO `{$this->table}`
+                    SET `adminuser`     = '{$this->admin_id}'
+                      , `company_uid`   = '{$params['company_uid']}'
+                      , `company_name`  = '{$params['company_name']}'
+                      , `shop_key`      = '{$params['shop_key']}'
+                      , `reg_date`      = now()
+                      {$add_set}
+SQL;
+        $res = query($sql, $this->localdb);
+        return $res;
+    }
+
+    function updateOpenApiAuth($params) {
+        $authList = $this->getOpenApiAuthList();
+        $count = count($authList);
+        for($i=0; $i<$count; $i++){
+            $uid = $authList[$i]['company_uid'];
+            if (in_array($uid, $this->assObj->auto_openapi_companies('company_uid'))) {
+                continue;
+            }
+            $auth_inquiry = json_encode($params[$uid]['inquiry']);
+            $modify_inquiry = json_encode($params[$uid]['modify']);
+            $sql = <<<SQL
+                UPDATE `{$this->table}`
+                   SET `auth_inquiry` = '{$auth_inquiry}'
+                     , `auth_modify` = '{$modify_inquiry}'
+                 WHERE `adminuser` = '{$this->admin_id}'
+                   AND `company_uid` = '{$uid}'
+SQL;
+            query($sql, $this->localdb);
+        }
+    }
+
+    function getOpenApiAuthList($convert = false) {
+        $licenseList = $this->licenseKey();
+        for($i=0; $i<count($licenseList); $i++){
+            $id = $licenseList[$i]['id'];
+            $authlicenses[$id] = json_decode($licenseList[$i]['auth_inquiry'], 'array');
+            $authmodifys[$id] = $licenseList[$i]['auth_modify'];
+            if ($this->order_manager == 'S1' && ! $this->is_bankda($licenseList[$i]['license_key'])) {
+                $authmodifys[$id] = $this->disable_s1_order_modify($authmodifys[$id]);
+            }
+        }
+
+        $sql = <<<SQL
+            SELECT *
+              FROM `{$this->table}`
+             WHERE `adminuser` = '{$this->admin_id}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $i = 0;
+        while($row = mysql_fetch_assoc($res)){
+            $data[$i] = $row;
+            $data[$i]['auth_inquiry'] = ($row['auth_inquiry'] && $row['auth_inquiry'] !== 'null') ? $row['auth_inquiry'] : '';
+            $data[$i]['auth_modify'] = ($row['auth_modify'] && $row['auth_modify'] !== 'null') ? $row['auth_modify'] : '';
+            if ($convert === true) {
+                $data[$i]['company_name'] = ajax_convert($row['company_name']);
+            }
+            $uid = $data[$i]['company_uid'];
+            $data[$i]['cocen']['inquiry'] = $authlicenses[$uid];
+            $data[$i]['cocen']['modify'] = $authmodifys[$uid];
+            $data[$i]['webhook_use'] = 'N'; 
+            if (in_array($uid, $this->webhook_use_company)) {
+                $data[$i]['webhook_use'] = 'Y'; 
+            }
+            $i++;
+        }
+        return $data;
+    }
+
+    function getOpenApiAuthInfo($params) 
+    {
+        if (!is_array($params) || ((strlen($params['shop_key']) < 1) && (strlen($params['company_uid']) < 1))) {
+            return false;
+        }
+
+        if ($params['shop_key']) {
+            $add_where = "AND `shop_key` = '{$params['shop_key']}'";
+        }
+        if ($params['company_uid']) {
+            $add_where = "AND `company_uid` = '{$params['company_uid']}'";
+        }
+        $sql = <<<SQL
+            SELECT *
+              FROM `{$this->table}`
+             WHERE `adminuser` = '{$this->admin_id}'
+                   {$add_where}
+SQL;
+
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row;
+    }
+
+    function delOpenApiAuth($uid) {
+        $sql = <<<SQL
+            DELETE FROM `{$this->table}` WHERE `adminuser` = '{$this->admin_id}' AND `company_uid` = '{$uid}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return $res;
+    }
+
+    function licenseKey($reset = false) {
+        $fileName = "/home/httpd/html/shopimages/openapi_company.txt";
+        $maObj = new MakeshopAdmin($this->admin_id);
+        if ($reset === false) {
+            $timegan = $maObj->_file_check($fileName, $this->apiCheckTime);
+        } else {
+            $timegan = "over";
+        }
+        if ($timegan == "over") {
+            $result = $this->getLicenseList();
+            $maObj->_file_write($fileName, aes_encrypt($result, 'makeshop_open_api'));
+        } else {
+            $result = aes_decrypt($maObj->_file_read($fileName), 'makeshop_open_api');
+        }
+        $licenseList = json_decode($result, 'array');
+        $this->webhook_use_company = $licenseList['webhook_company'];
+
+        //?��?�� ?��?�� 경로?�� ?���?? ?��보�?? ?���?? ?���?? ?��문에 ?��?�� 
+        $ex_file_name = "/home/httpd/html/shopimages/{$this->admin_id}/open_api_license.txt";
+        if (file_exists($ex_file_name)) {
+            unlink($ex_file_name);
+        }
+
+        return $licenseList['data'];
+    }
+
+    function getSearchCompany($company_name) {
+        $this->setMycallObj();
+        $this->mycallObj->add("action_mode", "searchCompany");
+        $this->mycallObj->add("company_name", $company_name);
+        $this->mycallObj->add("secret_key", $this->getSecretKey());
+        $this->mycallObj->exec();
+        return $this->mycallObj->get_data();
+    }
+
+    function getLicenseList() {
+        $this->setMycallObj();
+        $this->mycallObj->add("secret_key", $this->getSecretKey());
+        $this->mycallObj->exec();
+        return $this->mycallObj->get_data();
+    }
+
+    function getRequestHeaders() {
+        $headers = array();
+        foreach($_SERVER as $key => $value) {
+            if (substr($key, 0, 5) <> 'HTTP_') {
+                continue;
+            }
+            $header = str_replace(' ', '-', ucwords(str_replace('_', ' ', strtolower(substr($key, 5)))));
+            $headers[$header] = $value;
+        }
+        return $headers;
+    }
+
+    function isMakeshopEnabled() {
+        $adminuser_info = $this->adminuserInfo();
+        return (strtotime($adminuser_info['enddate']) < strtotime(date('Ymd'))) ? false : true;
+    }
+
+    function adminuserInfo() {
+        $sql =<<<SQL
+            SELECT * FROM adminuser 
+                WHERE id='{$this->adminuser}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row;
+    }
+
+    function companyUid()
+    {
+        $headers = $this->getRequestHeaders();
+        $open_api_auth = $this->getOpenApiAuthInfo(array(
+            'shop_key' => $headers['Shopkey'],
+        ));
+        return (Int) $open_api_auth['company_uid'];
+    }
+
+    /**
+     * ?��?��?��?�� ?�� 기�???���?? company_uid 조회
+     *
+     * @return void
+     */
+    function licesense_company_uid($licenses, $license_key)
+    {
+        foreach ($licenses as $license) {
+            if ($license['license_key'] === $license_key) {
+                return $license['id'];
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * ?��?�� openapi ?���?? ?���??
+     *
+     * @param [array] $param
+     * @return boolean
+     */
+    function openapi_auto_setting($param)
+    {
+        $company = $this->getOpenApiAuthInfo(array('company_uid' => $param['company_uid']));
+        if (!isset($company['shop_key'])) {
+            return $this->createOpenApiAuth(array(
+                'company_uid' => $param['company_uid'],
+                'company_name' => $param['company_name'],
+                'shop_key' => $this->createShopKey(),
+                'auth_inquiry' => $param['auths'],
+            ));
+        }
+        return $this->update_openapi_auto_setting(array(
+            'company_uid' => $param['company_uid'],
+            'auth_inquiry' => $param['auths'],
+        ));
+    }
+    
+    /**
+     * ?���?? 권한 ?��?�� �??�??
+     *
+     * @param [array] $param
+     * @return boolean
+     */
+    function update_openapi_auto_setting($param)
+    {
+        $fields = array();
+        if (isset($param['auth_inquiry'])) {
+            $auth_inquiry = json_encode($param['auth_inquiry']);
+            $fields[] = "`auth_inquiry` = '{$auth_inquiry}'";
+        }
+        if (!isset($param['company_uid']) || strlen($param['company_uid']) < 0 || count($fields) < 1) {
+            return false;
+        }
+        $set_field = implode(" ,", $fields);
+        $sql=<<<SQL
+            UPDATE `open_api_auth`
+             SET {$set_field}
+            WHERE `adminuser` = '{$this->admin_id}'
+                AND `company_uid` = '{$param['company_uid']}'
+SQL;
+        return query($sql, $this->localdb);
+    }
+
+    function deleteCompany($company_uid)
+    {
+        if (strlen($company_uid) < 1) {
+            return false;
+        }
+        $sql =<<<SQL
+            DELETE FROM `open_api_auth`
+            WHERE `adminuser` = '{$this->adminuser}' AND `company_uid` = '{$company_uid}'
+SQL;
+        return query($sql, $this->localdb);
+    }
+
+    function is_unlimit_count($type, $license_key)
+    {
+        //?��방넷 ?��?�� ?�� ?��?�� ?���?? ?�� unlimit 처리
+        $unlimit_count_exceptions = array(
+            'Njg1MmNlZGNiNjdkYzBmYTExYjU0M2FkMmE4Y2QwYzY=', //?��방넷
+        );
+        if (in_array($license_key, $unlimit_count_exceptions)) {
+            return AdminuserSpecial::openapi_unlimit_count($this->adminuser);
+        }
+        if ($this->is_sellmate($license_key)) {
+             //sellmate ?��?��?��?�� 주문?�� ?��?�� �???�� 기능??? unlimit 처리
+            $type_exceptions = array(
+                'sellmate_offline_order',
+                'sellmate_offline_order_status',
+            );
+            return in_array($type, $type_exceptions);
+        }
+        return false;
+    }
+
+    function is_sellmate($license_key)
+    {
+        $sellmate_unlimit_count_exceptions = array(
+            'MTY5MjU2YTAwOTkyMTk5ZjA4ZTcwZmZhMmJhYTQ0N2M=', //???메이?��
+            'YzdhODMwMzRmNjVhMDJiNTQ2YWM4N2JkYTg0NjgyNDU=' //개발
+        );
+        if (in_array($license_key, $sellmate_unlimit_count_exceptions)) {
+            return true;
+        }
+        return false;
+    }
+
+    function is_bankda($license_key)
+    {
+        if ($license_key == 'NjY5MTM4ZDkwNmMyOGJmMjlhODAxNTA1NDI1MzdkOGI=') {
+            return true;
+        }
+        return false; 
+    }
+
+    function disable_s1_order_modify($authmodify)
+    {
+        if (isset($authmodify['order']) && $authmodify['order'] == 'Y') {
+            $authmodify['order'] = 'N';
+        }
+        return $authmodify;
+    }
+
+}
+
