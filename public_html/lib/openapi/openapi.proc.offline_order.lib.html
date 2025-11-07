@@ -1,0 +1,506 @@
+<?php
+require_once $_ENV['PATH_LIB']."/openapi/openapi.validation.lib.html";
+require_once $_ENV['PATH_LIB']."/oo_create.lib.html"; 
+require_once $_ENV['PATH_FUNC']."/manager_admin.func.html";
+require_once $_ENV['PATH_LIB'].'/smart_reserve.lib.html';
+
+class OpenApiProcOfflineOrder extends OpenApiProcess
+{
+    var $adminuser;
+    var $process;
+    var $license;
+    var $oordercreate;
+
+    function OpenApiProcOfflineOrder($adminuser, $license)
+    {
+        $this->__construct($adminuser, $license);
+    }
+
+    /**
+     * 생성자에서는 $this->localdb 사용 불가
+     * @param string $adminuser
+     * @param array $license
+     * @return void
+     */
+    function __construct($adminuser, $license)
+    {
+        $this->adminuser = $adminuser;
+        $this->license = $license;
+    }
+
+    function setDbObj($localdb, $slavedb = null)
+    {
+        $this->selectdb = (is_resource($slavedb)) ? $slavedb : $localdb;
+        $this->localdb = $localdb;
+    }
+
+    function license()
+    {
+        return $this->license;
+    }
+
+    /**
+     * 처리할 타입 지정
+     * @param string $process
+     * @return void
+     */
+    function setProcess($process = 'create')
+    {
+        $this->process = $process;
+    }
+
+    /**
+     * @return bool
+     */
+    function commonValidate()
+    {
+        return true;
+    }
+
+    /**
+     * 처리 로직 수행
+     * @return array
+     */
+    function save()
+    {
+        switch ($this->process) {
+            case 'create' :
+                file_save_log("openapi_sellmate_offline_order_".date('Ymd'), "create_order request : ".json_encode($this->encodeUTF8($_POST)));
+                return $this->handler();
+        }
+
+        return array();
+    }
+
+    /**
+     * 값 유효성 검증
+     * @param array $param
+     * @return array
+     */
+    function validation($param)
+    {
+        $validation = OpenapiValidation::validation($param, array(
+            'baskets.*.product_uid'=> array('required', 'numeric'),
+            'baskets.*.sto_id'=> array('numeric'),
+            'baskets.*.product_name'=> array('required', 'strlen:250'),
+            'baskets.*.stock'=> array('required', 'numeric'),
+            'baskets.*.price'=> array('required', 'numeric'),
+            'baskets.*.reserve'=> array('numeric'),
+            'store_id'=> array('numeric'),
+            'billno'=> array('required'),
+            'user_id'=> array('required'),
+            'total_order_price'=> array('required', 'numeric'),
+            'total_pay_price'=> array('required', 'numeric'),
+            'total_used_reserve'=> array('numeric'),
+        ));
+        $result = array_merge($validation, $this->add_validation($param));
+        return $result;
+    }
+
+    /**
+     * 값 유효성 추가 검증
+     * @param [type] $param
+     * @return array
+     */
+    function add_validation($param)
+    {
+        $result = array();
+        if (!isset($param['baskets'])) {
+            return array('baskets는 하나 이상 등록이 필요합니다.');
+        }
+        return $result;
+    }
+
+    /**
+     * @return array
+     */
+    function handler() 
+    {
+        $return = Array();
+        $return['datas']['result'] = false;
+        $encode_data = $this->encodeEucKr($_POST);
+        $validation = $this->validation($encode_data);
+        if (count($validation) > 0) {
+            $return['datas']['message'] = $validation;
+            return $return;
+        }
+        $return['datas'] = $this->store($encode_data);
+        return $return;
+    }
+
+    function define_set_order_data($param)
+    {
+        $etc_type = "offline_store_id={$param['store_id']}|sellmate_offline_order=Y|";
+        // 회원 적립금 차감 처리
+        if ($param['total_used_reserve'] > 0 ) {
+           $etc_type .= "USERESERVE={$param['total_used_reserve']}|";
+        }
+        return array(
+           'start_price'       => $param['total_order_price'],
+           'cal_price'         => $param['total_pay_price'] + $param['total_used_reserve'],
+           'order_date'        => $param['order_date'],
+           'pay_date'          => $param['order_date'],
+           'order_status'      => 'Y',
+           'pay_status'        => 'Y',
+           'etctype'           => $etc_type,
+           'link_id'           => $param['link_id'],
+           'group_id'          => $users['group_id'],
+           'used_reserve'      => $param['total_used_reserve'],
+           'used_emoney'       => $param['total_used_emoney'],
+           'ip'                => $_SERVER['REMOTE_ADDR'],
+       );
+    }
+
+    function createOrderCreateObj($ordernum)
+    {
+        $this->oordercreate = new OrderCreate($this->adminuser, $ordernum);
+    }
+
+    /**
+     * 데이터 처리
+     * @param array $param
+     * @return bool
+     */
+    function store($encode_post)
+    {
+        $param = array_merge($encode_post, $this->create_add_fields());
+        $users = $this->define_user($param['user_id']);
+        $this->create_order_handle($param, $users);
+        $this->update_order_status($param, $users);
+        updatelogs($param['ordernum'], "[오프라인 주문서 생성] 영수증 번호 : {$param['billno']}");
+        file_save_log("openapi_sellmate_offline_order_".date('Ymd'), "create_order  data : ".json_encode($this->encodeUTF8($param))." user : ".json_encode($this->encodeUTF8($users)));
+        $this->update_order_max_barcode($param['barcode']);
+        return array(
+            'result' => true,
+            'billno' => $param['billno'],
+            'ordernum' => $param['ordernum'],
+            'is_user' => $users['is_user'],
+        );
+    }
+
+    function update_order_max_barcode($barcode)
+    {
+        $sql = "UPDATE `etc` set `order_max_barcode`='{$barcode}' where adminuser='{$this->adminuser}' limit 1 ";
+        query($sql, $this->localdb);
+    }
+
+    function update_order_status($param, $users)
+    {
+        $oo_delivery = new OODelivery($this->adminuser);
+        // oo_delivery.deli_date 등록
+        $oo_delivery->set_proc_delivery2($param['delivery_num']);
+        // oo_delivery.delicomplete_date 등록
+        $oo_delivery->set_proc2_delivery($param['delivery_num']);
+        // oo_log 등록
+        $logHnadle = new logLib($this->adminuser, $param['ordernum']);
+        $baskets = $this->basket_status($param['ordernum']);
+        if (is_array($baskets)) {
+            foreach ($baskets as $basket) {
+                $setLogs = array($basket['num']  => array('D15', 'D17', '오프라인 자동 배송완료 처리'));
+                $logHnadle->set_status_log($setLogs, '상태변경');
+            }
+        }
+        if ($users['is_user']) {
+            $this->update_user_order_date($param['user_id'], $param['order_date']);
+        }
+        
+    }
+
+    function basket_status($ordernum) {
+        $result = array();
+        $sql = <<<SQL
+            SELECT `num`, `basket_status`
+              FROM `oo_basket`
+             WHERE `adminuser` = '{$this->adminuser}'
+               AND `ordernum` = '{$ordernum}'
+SQL;
+        if (false !== ($res = query($sql, $this->localdb))) {
+            while ($row = mysql_fetch_assoc($res)) {
+                $result[$row['num']] = $row; 
+            }
+        }
+        return $result;
+    }
+
+    
+    function create_order_handle($param, $users)
+    {
+        $this->createOrderCreateObj($param['ordernum']);
+        $this->create_basket_temp($param);
+        $this->create_order_temp($param, $users);
+        $this->oordercreate->insert_tempdelivery(array(
+            'tempid'            => $param['tempid'],
+            'delivery_num'      => $param['delivery_num'],
+            'user_id'           => $param['user_id'],
+            'deli_type'         => 'KOR',
+            'delicom' => 0
+        ));
+        $this->order_reserve($param, $users);
+        $this->oordercreate->set_order_data($this->define_set_order_data($param));
+        $this->oordercreate->create_order_data();
+        // oo_pay_log 생성 및 갱신
+        $oorderprice  = new OrderPrice($this->adminuser, $param['ordernum']);
+        $oorderprice->logHandle->set_pay_log('PAY', '', $param['paymethod'], $param['ordernum']);
+    }
+    
+    function smart_reserve_proc($param, $users)
+    {
+        $smart_reserve = new SmartReserve($this->adminuser);
+        $ordernum = $param['ordernum'];
+        $remain_reserve = $users['reserve'] - $param['total_used_reserve'];
+        $ref = "openapi_offline_order";
+        $premium_data = ManagerAdmin::get_premium_info($this->adminuser, $this->localdb);
+        $smart_reserve->get_premium($premium_data);
+        $reserveResult = $smart_reserve->update_user_reserve($users['user_id'], $param['total_used_reserve'] * -1);
+        if ($reserveResult === true) {
+            $log_message = "ordernum: {$ordernum}  / ref: {$ref} / billno: {$param['billno']}";
+        } else if ($reserveResult === false) {
+            $log_message = "error - func: SmartReserve::update_user_reserve() / ordernum: {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+        } else {
+            $log_message = "query error({$reserveResult}) - / ordernum: {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+        }
+        Logs::reserve($users['user_id'], $this->adminuser, 'spend_reserve ', 'user', $log_message, $remain_reserve);
+        if (!$smart_reserve->get_order_reserve($users['user_id'], $ordernum)) {
+            $use_reserve_params = array(
+                'user_id'       => $users['user_id'],
+                'receive_price' => $param['total_used_reserve'],
+                'content'       => '[openapi] sellmate offline use',
+                'match_type'    => 'ordernum',
+                'match_key'     => $ordernum,
+                'log_type'      => 'spend_reserve',
+                'ref'           => $ref,
+            );
+            $reserveResult = $smart_reserve->use_reserve($use_reserve_params);
+            if ($reserveResult === true) {
+                $log_message = "ordernum: {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+            } else if ($reserveResult === false) {
+                $log_message = "error - func: SmartReserve::use_reserve() / ordernum: {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+                Logs::reserve($users['user_id'], $this->adminuser, 'reserve_record', 'reserve', $log_message, '0');
+            } else {
+                $log_message = "query error({$reserveResult}) - / ordernum: {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+                Logs::reserve($users['user_id'], $this->adminuser, 'reserve_record', 'reserve', $log_message, '0');
+            }
+        }
+    }
+
+    function reserve_proc($param, $users)
+    {
+        $ordernum = $param['ordernum'];
+        $reserve_R   = new Reserve($this->adminuser, true);
+        $reserve_U   = new UserReserve($this->adminuser, false);
+        $remain_reserve = $users['reserve'] - $param['total_used_reserve'];
+        $ref = "openapi_offline_order";
+        $reserveResult = $reserve_U->SetReserve($users['user_id'], $remain_reserve);
+        if ($reserveResult === true) {
+            $log_message = "ordernum: {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+        } else if ($reserveResult === false) {
+            $log_message = "error - func: SetReserve() / ordernum: {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+        } else {
+            $log_message = "query error({$reserveResult}) - / ordernum: {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+        }
+        Logs::reserve($users['user_id'], $this->adminuser, 'spend_reserve ', 'user', $log_message, $remain_reserve, $param['order_date']);
+        Logs::reserve($users['user_id'], $this->adminuser, 'spend_reserve ', 'reserve', $log_message, - $param['total_used_reserve'], $param['order_date']);
+
+        // 적립금 로그 저장
+        $reserveRels = array(
+            'ordernum'  => $ordernum,
+        );
+        $reserveText = "Offline 적립금으로 물품구입";
+        $reserveResult = $reserve_R->AddReserve($users['user_id'], - $param['total_used_reserve'], $reserveText, $param['date'], $reserveRels);
+        var_dump($reserveResult);
+        if ($reserveResult === true) {
+            $log_message = "ordernum : {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+        } else if ($reserveResult === false) {
+            $log_message = "error - func: AddReserve() / ordernum : {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+            Logs::reserve($users['user_id'], $this->adminuser, 'reserve_record', 'reserve', $log_message, '0');
+        } else {
+            $log_message = "query error({$reserveResult}) - / ordernum : {$ordernum} / ref: {$ref} / billno: {$param['billno']}";
+            Logs::reserve($users['user_id'], $this->adminuser, 'reserve_record', 'reserve', $log_message, '0');
+        }
+    }
+
+    function order_reserve($param, $users)
+    {
+        // 적립금 회원 테이블에 반영인 경우
+        if ($param['total_used_reserve'] > 0 && $users['is_user']) {
+            $remain_reserve = $users['reserve'] - $param['total_used_reserve'];
+            $this->is_smart_reserve_use() ? $this->smart_reserve_proc($param, $users) : $this->reserve_proc($param, $users);
+            $logmsg = "[openapi] sellmate offline order 회원 적립금 사용 - adminuser : {$this->adminuser}, ordernum : {$param['ordernum']}, user_id : {$users['user_id']}, 보유 적립금 : {$users['reserve']}, 사용 적립금 : {$param['total_used_reserve']}, 남은 적립금 : {$remain_reserve}";
+            save_sql($logmsg, 0);
+            file_save_log("openapi_sellmate_offline_order_".date('Ymd'), "used reserve : {$param['user_id']} - {$param['total_used_reserve']} ");
+        }
+    }
+
+    function create_order_temp($param, $users)
+    {
+        $orders = array(
+            'ordernum'          => $param['ordernum'],
+            'tempid'            => $param['tempid'],
+            'id'                => $param['user_id'],
+            'is_member'         => "MEMBER",
+            'barcode'           => $param['barcode'],
+            'sender'            => $users['sender'],
+            'paymethod'         => $param['paymethod'],
+            'paydata'           => 'offline',
+            'phone'             => $users['phone'],
+            'mobile'            => $users['mobile'],
+            'email'             => $users['email'],
+            'pay_path'          => "WEB",
+            'mem_language'      => "kor",
+            'mem_type'          => ($users['mem_type']) ? $users['mem_type'] : "PERSON",
+            'bank_name' => 'offline',
+            'banker' => $users['sender'],
+            'link_url' => $param['link_url'],
+            'link_id' => $param['link_id'],
+        );
+        $this->oordercreate->insert_temporder($orders);
+        file_save_log("openapi_sellmate_offline_order_".date('Ymd'), "create_order_temp : ".json_encode($this->encodeUTF8($orders)));
+    }
+
+    function create_basket_temp($param)
+    {
+        if (is_array($param['baskets'])) {
+            foreach ($param['baskets'] as $index => $basket)
+            {
+                $baskets = array_merge(array(
+                    'tempid' => $param['tempid'],
+                    'delivery_num' => $param['delivery_num'],
+                    'link_id' => $param['link_id'],
+                    'stock_chk' => 'NOT',
+                    'basket_status' => $param['basket_status'],
+                    'smartpickup_store_uid' => $param['store_id'],
+                    'smartpickup_wishdate' => $param['order_date']
+                ), $this->define_product($basket));
+                $this->oordercreate->insert_temporderbasket($baskets);
+                file_save_log("openapi_sellmate_offline_order_".date('Ymd'), "create_basket_temp : ".json_encode($this->encodeUTF8($baskets)));
+            }
+        }
+    }
+
+    
+
+    function define_product($basket)
+    {
+        $productObj = new Product($this->adminuser);
+        $productObj->set_uid($basket['product_uid']);
+        $products = (array) $productObj->get();
+        $options = $this->define_product_option($basket['product_uid'], $basket['sto_id']);
+        return array(
+            'product_uid'       => isset($products['product_uid']) ? $products['product_uid'] : '999999',
+            'prd_option_uid'    => $basket['sto_id'],
+            'brandcode'         => $products['brandcode'], 
+            'product_name'      => strlen($basket['product_name']) ? $basket['product_name'] : $products['brandname'],
+            'basket_stock'      => ($basket['stock']) ? $basket['stock'] : 1,
+            'product_price'     => $basket['price'],
+            'product_buyprice'  => $products['buyprice'],
+            'product_cate1'     => substr($products['brandcode'], 0, 3),
+            'sell_price'        => $basket['price']*$basket['stock'],
+            'product_reserve'   => strlen($basket['reserve']) ? $basket['reserve'] : 0,
+            'option_data'       => $options['option_data'],
+            'api_option_data'   => $options['option_data'],
+            'option_type'       => $options['option_type'],
+            'provider'          => $products['provider'],
+        );
+    }
+
+    function define_product_option($product_uid, $sto_id)
+    {
+        $ProductOption = new ProductOption($this->adminuser, $product_uid);
+        $options = $ProductOption->get();
+        $sto_price = 0;
+        $prd_option_uid = $option_data = '';
+        $option_type = $products['option_type'];
+        if ($option_type != 'DIY' && $option_type != 'HYBRID') {
+            $option_type = $ProductOption->is_exist() === true ? 'PS' : 'NO';
+        }
+        for ($j=0; $j<count($options['stock']); $j++) {
+            if ($options['stock'][$j]->sto_id == $sto_id) {
+                $opt_ids = explode(",", $options['stock'][$j]->opt_ids);
+                $opt_values = explode(",", $options['stock'][$j]->opt_values);
+                $sto_price = $options['stock'][$j]->sto_price;
+                $prd_option_uid = $options['stock'][$j]->sto_id;
+                $option_type = $options['stock'][$j]->sto_type;
+                break;
+            }
+        }
+
+        $option_data = '';
+        $optIdx = 0;
+        for ($j=0; $j<count($options['option']); $j++) {
+            if (is_array($opt_ids) && in_array($options['option'][$j]->opt_id, $opt_ids)) {
+                $option_data .= "{$options['option'][$j]->opt_name} : {$opt_values[$optIdx]}, ";
+                $optIdx++;
+            }
+        }
+        $option_data = substr($option_data, 0, -2);
+
+        if ($sto_price > 0) {
+            $option_data .= "(+{$sto_price})";
+        } else if ($sto_price < 0) {
+            $option_data .= "(-{$sto_price})";
+        }
+        return array(
+            'option_data' => $option_data,
+            'option_type' => $option_type
+        );
+    }
+
+    function define_user($user_id)
+    {
+        $users = $this->find_by_userid($user_id);
+        $is_user = is_array($users) && $users['dormant'] === 'N' && $users['id'] === $user_id ? true : false;
+        return array(
+            'is_user' => $is_user,
+            'user_id' => $users['id'],
+            'group_id' => $users['group_id'],
+            'reserve' => $users['reserve'],
+            'sender' => $is_user ? $users['hname'] : '[셀메이트]미등록 회원',
+            'phone' => $is_user ? $users['hphone'] : '',
+            'mobile' => $is_user ? $users['etcphone'] : '',
+            'email' => $is_user ? $users['email'] : '',
+        ); 
+    }
+
+    function update_user_order_date($user_id, $date)
+    {
+        $sql = <<<SQL
+            UPDATE `user`
+               SET `orderdate` = '{$date}'
+             WHERE `adminuser` = '{$this->adminuser}'
+               AND `id` = '{$user_id}'
+SQL;
+        return query($sql, $this->localdb);
+    }
+
+    function create_add_fields()
+    {
+
+        require_once "{$_ENV['PATH_FUNC']}/create_tempid.func.html";
+        $tempid = create_tempid();
+        $etc = $this->etcInformation();
+        return array(
+            'tempid' => $tempid,
+            'ordernum' => gen_ordernum(),
+            'delivery_num' => gen_deliverynum(),
+            'barcode' => $this->make_barcode($etc['order_max_barcode']),
+            'paymethod' => 'B',
+            'basket_status' => 'D17',
+            'date' => date('YmdHis'),
+            'order_date' => date('Y-m-d H:i:s'),
+            'link_id' => 'openapi'
+        );
+    }
+
+    function make_barcode($order_max_barcode)
+    {
+        $maxcode = "";
+        $date = date('Ymd');
+        if (substr("2".$order_max_barcode, 0, 8) == $date) {
+            $maxcode = $order_max_barcode;
+        }
+        return strlen($maxcode) == 0 ? substr($date, 1)."00001" : substr($date, 1).substr("0000".(substr($maxcode, -5) + 1), -5);
+    }
+
+
+}
+
