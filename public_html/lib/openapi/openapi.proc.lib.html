@@ -157,7 +157,7 @@ class OpenApiProcess {
             return Array(
                 'return_code' => '9104',
             );
-        } 
+        }
         $factory->setDbObj($this->localdb, $this->slavedb);
         $factory->setProcess($this->getInput('process'));
         $factory->setDatas($this->getPostInput('datas'));
@@ -457,7 +457,10 @@ class OpenApiProcess {
                 return new OpenApiProcOfflineOrder($this->adminuser, $license); 
             case 'sellmate_offline_order_status' :
                 require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.offline_order_status.lib.html';
-                return new OpenApiProcOfflineOrderStatus($this->adminuser, $license); 
+                return new OpenApiProcOfflineOrderStatus($this->adminuser, $license);
+			case 'cpick_online_order' :
+				require_once $_ENV['PATH_LIB'].'/openapi/openapi.proc.cpick_online_order.lib.html';
+				return new OpenApiProcCpickOnlineOrder($this->adminuser, $license);
         }
     }
 
