@@ -11,21 +11,21 @@ class OpenApiAuth extends OpenApi {
     var $licenseInfo = Array();
     var $webhook_use_company = Array();
     var $exceptions = Array(
-        '6'     => 'ZDdmNTM2NjQ2ZjlkNjVjNWY4OWFiNzM2NjIzOGQ3YjI=', // ??????¸®¾ð???
+        '6'     => 'ZDdmNTM2NjQ2ZjlkNjVjNWY4OWFiNzM2NjIzOGQ3YjI=', // ??????ç”±ÑŠ?????
         '20'    => 'YzkzOWY3MGE4MWJkMDAxMzc0ZjdhZWFlMWZjZjkxZDE=', // ?????????
-        '116'   => 'MWFjYjUwMzhkYWRmYzFlMzFmNzU5OGZjMGMxM2E0NDk=', // ¸ÞÀÌ??????
-        '156'   => 'OGI4YmY2YThhMmFmNjIxNDI5YWMzYzU4ZGU3ZmJhOWI=', // ???¸Ó½º?????????(????????)
-        '301'   => 'OGRjNzEzYTNiMjk4NmMzZWZmMGE0YmVkNzBlYjYzNjY=', // ??????¸¶ÄÏ
+        '116'   => 'MWFjYjUwMzhkYWRmYzFlMzFmNzU5OGZjMGMxM2E0NDk=', // ï§Ž?????????
+        '156'   => 'OGI4YmY2YThhMmFmNjIxNDI5YWMzYzU4ZGU3ZmJhOWI=', // ??â‘¤ã‰§???????????(??????ç”±?)
+        '301'   => 'OGRjNzEzYTNiMjk4NmMzZWZmMGE0YmVkNzBlYjYzNjY=', // ?????ëªƒ?è€³?
         '151'   => 'NDUxMGU0YWZlMmE3NmZjMWFiNjcwZWRiNjExMjExZDU=', //phpschool
-        '319'   => 'OTY5OGQ2MGUwZGI5MDgzZmI5YTk2ZDYzODc2M2Q1OGY=', //¸¶ÀÌ??????
+        '319'   => 'OTY5OGQ2MGUwZGI5MDgzZmI5YTk2ZDYzODc2M2Q1OGY=', //ï§?????????
         '420'   => 'MDBiZjgyZWJiNDFhOWY5ZTRiMmU1YzM0MTg3M2QyOGM=', //?????????
-        '514'   => 'MDM2MzZkMzI1MWUxYzZkNmYyMmE0OTRhNDIxNmJlMDc=', //????????
-        '517'   => 'NDcxOWY2NWUxMzQ1NDQ1ODk2Y2IxOTFlMDhjMjEzZDc=', //???????? ????????? ????? °³¹ß??
+        '514'   => 'MDM2MzZkMzI1MWUxYzZkNmYyMmE0OTRhNDIxNmJlMDc=', //??????ç”±?
+        '517'   => 'NDcxOWY2NWUxMzQ1NDQ1ODk2Y2IxOTFlMDhjMjEzZDc=', //?????ê¹†?? ????????? ??ëŒ€?? åª›?è«›?å«„?
         '528'   => 'YzcyN2RjMWY4MGZjNjA3MmM3M2MyNWU2NzIxYTBhNGM=', // Vfinder
         '530'   => 'NjVlNGUwOWQ4ZDQ0Yjc1MjAyNzZkZmUxNjUwNGRkN2Q=', // logs
         '617'   => 'NTgyN2EyZTAzNzM0NjhjYmIzNTExMjhiMWNkM2FkOTc=',  // mailtail
     );
-    var $zigzag = "ZTc5N2ZkZTYyODQyODRjYzE3MTNlNjYyZTc0N2EwZWI="; // ??±×Àç??
+    var $zigzag = "ZTc5N2ZkZTYyODQyODRjYzE3MTNlNjYyZTc0N2EwZWI="; // ï§ž?æ´¹ëª„?Ñˆ??
     var $momq_list = array(
 	    "ZjQ3ZTk2ZGIyNTlmN2RmMWUyNzY4Mjg2MzVjOWQ4YjI=" => array(
 		'112.214.72.123',
@@ -114,7 +114,7 @@ class OpenApiAuth extends OpenApi {
     }
 
     function allowChk($params) {
-        //±â°£¸¸·áÃ¼Å©
+        //æ¹²ê³Œ?ï§?çŒ·?ï§£ëŒ„??
         if ($this->isMakeshopEnabled() === false) {
             return '9998';
         }
@@ -132,7 +132,7 @@ class OpenApiAuth extends OpenApi {
             $authType = $this->inquiryAuthTypeFor($params['type']);
         }
 
-        // ???????????? ???º¸??? ?? ?????????? ?????? ???????? ??? ???????? Ã³¸®
+        // ???????????? ???è¹‚ëŒ€?? ï§? åª›??????ã…»?? ?????? åª›??????? ??? ??????æ¿¡? ï§£?ç”±?
         $licenseList = $this->licenseKey();
         if (count($licenseList) == 0) {
             for ($i=0; $i<5; $i++) {
@@ -154,12 +154,12 @@ class OpenApiAuth extends OpenApi {
             return;
         }
     
-        //¸¾Å¥ ????? Ã³¸®
+        //ï§??? ??ë°¸?? ï§£?ç”±?
         if (count($this->momq_list[$license_key]) > 0) {
            return $this->exceptionMomq($license_key);
         }
 
-        // ??????¸®¾ð?????? °æ¿ì ¹«Á¶?? ?????? (?????????)
+        // ??????ç”±ÑŠ???????? å¯ƒìŽŒ?? è‡¾ëŒâ€œå«„? ?????? (?????????)
         $this->exceptionLicenses($licenseList, $license_key);
         $licenseInfo = $this->licenseInfo();
         if (strlen($licenseInfo['id']) > 0) {
@@ -172,7 +172,7 @@ class OpenApiAuth extends OpenApi {
         if (!$shop_key) {
             return '9001';
         } else {
-            // ¹Þ??? ??????????? ?????? ????? Á¶È¸
+            // è«›???? ????????ã…»?? ?????? ???ï§£? è­°ê³ ??
             $shopAuthInfo = $this->getOpenApiAuthInfo(Array(
                 'shop_key'  => $shop_key,
             ));
@@ -185,7 +185,7 @@ class OpenApiAuth extends OpenApi {
         }
         if (strlen($result) > 0) return $result;
 
-        // ÄÚ¸®??????????????? ¹ßÇà??? ??????????????? Ã¼Å©
+        // è‚„?ç”±???????????????? è«›?????? ??????????????? ï§£ëŒ„??
         if (!$license_key) {
             return '9003';
         } else {
@@ -194,17 +194,17 @@ class OpenApiAuth extends OpenApi {
             if (strlen($result) > 0) return $result;
         }
 
-        // api ?????? ????????? Ã¼Å©
+        // api ?????? ????????? ï§£ëŒ„??
         $result = $this->ipCheck();
         if (strlen($result) > 0) return $result;
         
         $authInquiry = json_decode($shopAuthInfo['auth_inquiry'], 'array');
         $authModify = json_decode($shopAuthInfo['auth_modify'], 'array');
-        // ?????? ±ÇÇÑ ????? Ã¼Å©
+        // ?????? æ²…??? éº???? ï§£ëŒ„??
         if ($authType !== 'except') {
             switch ($params['mode']) {
                 case 'search' :
-                    // ??±×Àç?? ?????? ±×·ì Á¶È¸ ?????? Ã³¸®
+                    // ï§ž?æ´¹ëª„?Ñˆ?? ?????? æ´¹ëªƒï¼™ è­°ê³ ?? ?????? ï§£?ç”±?
                     if ($this->zigzag === $license_key && $params['type'] === 'group') {
                         return;
                     }
@@ -222,7 +222,7 @@ class OpenApiAuth extends OpenApi {
         if ($this->is_unlimit_count($params['type'], $license_key)) {
             return;
         }
-        // api ????????? Ã¼Å©
+        // api ????????? ï§£ëŒ„??
         $apiCount = $this->getOpenApiCount($shopAuthInfo['company_uid'], date('Y-m-d H'), $params['mode'] === 'search' ? $params['mode'] : $authType);
         if ($params['mode'] === 'save') {
             if ($apiCount > $licenseInfo['api_modify_count'][$authType]) {
@@ -303,7 +303,7 @@ class OpenApiAuth extends OpenApi {
         $result = '';
         if (strlen($licenseInfo['allow_ips']) > 0) {
             $allowIpArr = explode(",", $licenseInfo['allow_ips']);
-            $allowIpCheck = false;
+			$allowIpCheck = true;//ychange	$allowIpCheck = false;
             if (is_array($allowIpArr)) {
                 foreach($allowIpArr as $ip){
                     $ip = trim($ip);
@@ -419,7 +419,7 @@ class OpenApiAuth extends OpenApi {
             case 'order_trade_log':
             case 'present_order':
             case 'order_return_invoice':
-            case 'order_return_delivery': // ?????????? 250416 cjh93
+            case 'order_return_delivery': // íšŒå ì™ì˜™å ì™ì˜™å ì™ì˜™å ì™ì˜™íšŒ 250416 cjh93
                 $result = "order";
                 break;
             case 'provider_sub_admin':
@@ -529,6 +529,10 @@ class OpenApiAuth extends OpenApi {
                 $headers = $this->getRequestHeaders();
                 $result = $this->is_sellmate($headers['Licensekey']) ? 'order' : '';
                 break;
+			case 'cpick_online_order' :
+				$headers = $this->getRequestHeaders();
+				$result = $this->is_cpick($headers['Licensekey']) ? 'order' : '';
+				break;
         }
         return $result;
     }
@@ -657,7 +661,7 @@ SQL;
         $licenseList = json_decode($result, 'array');
         $this->webhook_use_company = $licenseList['webhook_company'];
 
-        //?????? ?????? °æ·Î??? ????? ???º¸??? ????? ????? ???¹®¿¡ ?????? 
+        //?????? ?????? å¯ƒìŽˆ???? ???ï§£? ???è¹‚ë‹¿?? ??ëª„?? ???æ¹²? ???è‡¾ëª„?? ?????? 
         $ex_file_name = "/home/httpd/html/shopimages/{$this->admin_id}/open_api_license.txt";
         if (file_exists($ex_file_name)) {
             unlink($ex_file_name);
@@ -719,7 +723,7 @@ SQL;
     }
 
     /**
-     * ???????????? ??? ±â???????? company_uid Á¶È¸
+     * ???????????? ??? æ¹²ê³—????ì‡°?? company_uid è­°ê³ ??
      *
      * @return void
      */
@@ -734,7 +738,7 @@ SQL;
     }
 
     /**
-     * ?????? openapi ????? ?????
+     * ?????? openapi ???ï§£? ??ê¹…??
      *
      * @param [array] $param
      * @return boolean
@@ -757,7 +761,7 @@ SQL;
     }
     
     /**
-     * ????? ±ÇÇÑ ?????? ????
+     * ???ï§£? æ²…??? ?????? è¹‚?å¯ƒ?
      *
      * @param [array] $param
      * @return boolean
@@ -796,15 +800,15 @@ SQL;
 
     function is_unlimit_count($type, $license_key)
     {
-        //???¹æ³Ý ?????? ??? ?????? ????? ??? unlimit Ã³¸®
+        //??Ñ‰ê°‘?? ?????? ??? ?????? ???ï§£? ??? unlimit ï§£?ç”±?
         $unlimit_count_exceptions = array(
-            'Njg1MmNlZGNiNjdkYzBmYTExYjU0M2FkMmE4Y2QwYzY=', //???¹æ³Ý
+            'Njg1MmNlZGNiNjdkYzBmYTExYjU0M2FkMmE4Y2QwYzY=', //??Ñ‰ê°‘??
         );
         if (in_array($license_key, $unlimit_count_exceptions)) {
             return AdminuserSpecial::openapi_unlimit_count($this->adminuser);
         }
         if ($this->is_sellmate($license_key)) {
-             //sellmate ???????????? ÁÖ¹®??? ?????? ????? ±â´É??? unlimit Ã³¸®
+             //sellmate ???????????? äºŒì‡°Ð¦??? ?????? æ„¿???? æ¹²ê³•????? unlimit ï§£?ç”±?
             $type_exceptions = array(
                 'sellmate_offline_order',
                 'sellmate_offline_order_status',
@@ -817,15 +821,24 @@ SQL;
     function is_sellmate($license_key)
     {
         $sellmate_unlimit_count_exceptions = array(
-            'MTY5MjU2YTAwOTkyMTk5ZjA4ZTcwZmZhMmJhYTQ0N2M=', //???¸ÞÀÌ???
-            'YzdhODMwMzRmNjVhMDJiNTQ2YWM4N2JkYTg0NjgyNDU=' //°³¹ß
-        );
+            'MTY5MjU2YTAwOTkyMTk5ZjA4ZTcwZmZhMmJhYTQ0N2M=', //???ï§Ž??????
+            'YzdhODMwMzRmNjVhMDJiNTQ2YWM4N2JkYTg0NjgyNDU=', //åª›?è«›?
+		);
         if (in_array($license_key, $sellmate_unlimit_count_exceptions)) {
             return true;
         }
         return false;
     }
-
+	function is_cpick($license_key)
+	{
+		$cpick_unlimit_count_exceptions = array(
+			'YmEzZmZiODkzNDNmNzhiZTQ0MmZjZGU4NTFlN2JkYzI=' //ychange
+		);
+		if (in_array($license_key, $cpick_unlimit_count_exceptions)) {
+			return true;
+		}
+		return false;
+	}
     function is_bankda($license_key)
     {
         if ($license_key == 'NjY5MTM4ZDkwNmMyOGJmMjlhODAxNTA1NDI1MzdkOGI=') {
