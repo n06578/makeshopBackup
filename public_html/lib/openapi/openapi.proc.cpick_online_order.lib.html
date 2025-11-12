@@ -1,1 +1,476 @@
-파일생성
+<?php
+require_once $_ENV['PATH_LIB']."/openapi/openapi.validation.lib.html";
+require_once $_ENV['PATH_LIB']."/oo_create.lib.html";
+require_once $_ENV['PATH_FUNC']."/manager_admin.func.html";
+require_once $_ENV['PATH_LIB'].'/smart_reserve.lib.html';
+/* 입금확인 */
+class OpenApiProcCpickOnlineOrder extends OpenApiProcess
+{
+	var $adminuser;
+	var $process;
+	var $license;
+	var $oordercreate;
+	function OpenApiProcCpickOnlineOrder($adminuser, $license)
+	{
+		$this->__construct($adminuser, $license);
+	}
+
+	/**
+	 * 생성자에서는 $this->localdb 사용 불가
+	 * @param string $adminuser
+	 * @param array $license
+	 * @return void
+	 */
+	function __construct($adminuser, $license)
+	{
+		$this->adminuser = $adminuser;
+		$this->license = $license;
+	}
+
+	function setDbObj($localdb, $slavedb = null)
+	{
+		$this->selectdb = (is_resource($slavedb)) ? $slavedb : $localdb;
+		$this->localdb = $localdb;
+	}
+
+	function license()
+	{
+		return $this->license;
+	}
+
+	/**
+	 * 처리할 타입 지정
+	 * @param string $process
+	 * @return void
+	 */
+	function setProcess($process = 'create')
+	{
+		$this->process = $process;
+	}
+
+	/**
+	 * @return bool
+	 */
+	function commonValidate()
+	{
+		return true;
+	}
+
+	/**
+	 * 처리 로직 수행
+	 * @return array
+	 */
+	function save()
+	{
+		switch ($this->process) {
+			case 'create' :
+				file_save_log("openapi_cpick_online_order_".date('Ymd'), "create_order request : ".json_encode($this->encodeUTF8($_POST)));
+				return $this->handler();
+		}
+
+		return array();
+	}
+
+	/**
+	 * 값 유효성 검증
+	 * @param array $param
+	 * @return array
+	 */
+	function validation($param)
+	{
+		$validation = OpenapiValidation::validation($param, array(
+			'user_id' =>array('required'),
+			'order_date' =>array('required'),
+			'total_order_price' =>array('required', 'numeric'),
+			'total_pay_price' =>array('required', 'numeric'),
+			'paymethod' =>array('required'),
+			'sender' =>array('required'),
+			'phone' =>array('required'),
+			'mobile' =>array('required'),
+			'email' =>array('required'),
+			'memo' =>array('required'),
+			'post' =>array('required'),
+			'address' =>array('required'),
+			'address2' =>array('required'),
+			'deli_price' =>array('required', 'numeric'),
+			'receiver' =>array('required'),
+			'receiver_mobile' =>array('required'),
+			'receiver_phone' =>array('required'),
+			'deli_msg' =>array('required'),
+			'link_id' =>array('required'),
+
+			'baskets.*.product_uid' => array('required', 'numeric'),
+			'baskets.*.prd_option_uid' => array('required', 'numeric'),
+			'baskets.*.stock' => array('required', 'numeric'),
+			'baskets.*.price' => array('required', 'numeric'),
+			'baskets.*.product_name' => array('required'),
+			'baskets.*.option_name' => array('required'),
+		));
+		$result = array_merge($validation, $this->add_validation($param));
+		return $result;
+	}
+
+	/**
+	 * 값 유효성 추가 검증
+	 * @param [type] $param
+	 * @return array
+	 */
+	function add_validation($param)
+	{
+		$result = array();
+		if (!isset($param['baskets'])) {
+			return array('baskets는 하나 이상 등록이 필요합니다.');
+		}
+		return $result;
+	}
+
+	/**
+	 * @return array
+	 */
+	function handler()
+	{
+		$return = Array();
+		$return['datas']['result'] = false;
+		$encode_data = $this->encodeEucKr($_POST['datas']);
+		$validation = $this->validation($encode_data);
+		if (count($validation) > 0) {
+			$return['datas']['message'] = $validation;
+			return $return;
+		}
+
+		$return['datas'] = $this->store($encode_data);
+		return $return;
+	}
+
+	function define_set_order_data($param)
+	{
+		return array(
+			'start_price'       => $param['total_order_price'],
+			'cal_price'         => $param['total_pay_price'] + $param['total_used_reserve'],
+			'order_date'        => $param['order_date'],
+			'order_status'      => 'Y',
+			'link_id'           => $param['link_id'],
+			'group_id'          => $users['group_id'],
+			'used_reserve'      => $param['total_used_reserve'],
+			'used_emoney'       => $param['total_used_emoney'],
+			'ip'                => $_SERVER['REMOTE_ADDR'],
+		);
+	}
+
+	function createOrderCreateObj($ordernum)
+	{
+		$this->oordercreate = new OrderCreate($this->adminuser, $ordernum);
+	}
+
+	function createOrderPayObj()
+	{
+		$this->oorderpay = new openApiPrcoOrderPay($this->adminuser,$this->localdb);
+	}
+
+	/**
+	 * 데이터 처리
+	 * @param array $param
+	 * @return bool
+	 */
+	function store($encode_post)
+	{
+		$param = array_merge($encode_post, $this->create_add_fields($encode_post));
+		$users = $this->define_user($param);
+
+		/*
+		$this->createOrderPayObj();
+		$ordernum = '20251112091144-36981665860'; // 페이지 수동 접수
+		$ordernum = '20251112091803-10121736441'; // 1
+		$ordernum = '20251112102339-39667463005'; // 2
+		$ordernum = '20251112112510-69794587570'; // 3
+		$ordernum = '20251112115246-65236310562 '; // 4
+		$ordernum = '20251112120144-69428774545 '; // 5
+		$ordernum = '20251112135928-66312587244 '; // 6
+
+		$order_info  = OrderData::get_order_data($this->adminuser,$ordernum, $this->localdb);
+		$basket_info = OrderData::get_basket_datas($this->adminuser, $ordernum, $this->localdb);
+        $result =  OOStock::set_stock($this->adminuser, $ordernum, $arr_basket_num, '-');
+
+		$stock_return = $this->oorderpay->orderPaidStockProcess($ordernum, $basket_info);
+		$save_log_text = count($stock_return[1]) > 0 ?  "상품 수량 차감 완료([".implode('],[', $stock_return[1])."])" : "상품 수량 차감 없음";
+		$arr_basket_num[] = $basket_info;
+
+		return array(
+			'order_info' =>$order_info,
+			'basket_info' => $basket_info,
+//			'stock_return' => $stock_return,
+			'save_log_text' =>$save_log_text
+		);
+		//*/
+		$this->create_order_handle($param, $users);
+		updatelogs($param['ordernum'], "### 크픽 주문서 생성 ###");
+		$this->update_order_status($param, $users);
+		file_save_log("openapi_cpick_online_order_".date('Ymd'), "create_order  data : ".json_encode($this->encodeUTF8($param))." user : ".json_encode($this->encodeUTF8($users)));
+		$this->update_order_max_barcode($param['barcode']);
+
+		$order_info  = OrderData::get_order_data($this->adminuser,$ordernum, $this->localdb);
+		$order_price = new OrderPrice($this->adminuser, $param['ordernum']);
+		$order_price->act_undobankpay($order_info['cal_price']);
+
+//		$basket_info = OrderData::get_basket_datas($this->adminuser, $param['ordernum'], $this->localdb);
+//		OOStock::set_stock($this->adminuser, $param['ordernum'], $arr_basket_num, '-');
+//		$arr_basket_num[] = $basket_info;
+//		$stock_return = $this->oorderpay->orderPaidStockProcess($param['ordernum'], $basket_info);
+//		$save_log_text = count($stock_return[1]) > 0 ?  "상품 수량 차감 완료([".implode('],[', $stock_return[1])."])" : "상품 수량 차감 없음";
+
+		return array(
+			'result' => true,
+			'ordernum' => $param['ordernum'],
+			'stock_return' => $stock_return,
+			'save_log_text' =>$save_log_text,
+			'result_data' =>$result
+		);
+	}
+
+	function update_order_max_barcode($barcode)
+	{
+		$sql = "UPDATE `etc` set `order_max_barcode`='{$barcode}' where adminuser='{$this->adminuser}' limit 1 ";
+		query($sql, $this->localdb);
+	}
+
+	function update_order_status($param, $users)
+	{
+		return true;
+		// oo_log 등록
+		$logHnadle = new logLib($this->adminuser, $param['ordernum']);
+		$baskets = $this->basket_status($param['ordernum']);
+		if (is_array($baskets)) {
+			foreach ($baskets as $basket) {
+				$setLogs = array($basket['num']  => array('S00', 'S01', '크픽 자동 결재완료 처리'));
+				$logHnadle->set_status_log($setLogs, '상태변경');
+			}
+		}
+		if ($users['is_user']) {
+			$this->update_user_order_date($param['user_id'], $param['order_date']);
+		}
+	}
+
+	function basket_status($ordernum) {
+		$result = array();
+		$sql = <<<SQL
+            SELECT `num`, `basket_status`
+              FROM `oo_basket`
+             WHERE `adminuser` = '{$this->adminuser}'
+               AND `ordernum` = '{$ordernum}'
+SQL;
+		if (false !== ($res = query($sql, $this->localdb))) {
+			while ($row = mysql_fetch_assoc($res)) {
+				$result[$row['num']] = $row;
+			}
+		}
+		return $result;
+	}
+
+
+	function create_order_handle($param, $users)
+	{
+		$this->createOrderCreateObj($param['ordernum']);
+		$this->create_basket_temp($param);
+		$this->create_order_temp($param, $users);
+		$this->create_order_msg_temp($param);
+		$this->oordercreate->insert_tempdelivery(array(
+			'tempid'            => $param['tempid'],
+			'delivery_num'      => $param['delivery_num'],
+			'user_id'           => $param['user_id'],
+			'post'				=> $param['post'],
+			'address'			=> $param['address'],
+			'address2'			=> $param['address2'],
+			'deli_price'		=> $param['deli_price'],
+			'receiver'			=> $param['receiver'],
+			'receiver_mobile'	=> $param['receiver_mobile'],
+			'receiver_phone'	=> $param['receiver_phone'],
+			'deli_msg'			=> $param['deli_msg'],
+			'deli_type'         => 'KOR',
+			'delicom' => ''
+		));
+		$this->oordercreate->set_order_data($this->define_set_order_data($param));
+		$this->oordercreate->create_order_data();
+	}
+
+	function create_order_temp($param, $users)
+	{
+		$orders = array(
+			'ordernum'          => $param['ordernum'],
+			'tempid'            => $param['tempid'],
+			'id'                => $param['user_id'],
+			'is_member'         => $users['is_user']=="Y"?"MEMBER":"GUEST",
+			'barcode'           => $param['barcode'],
+			'sender'            => $users['sender'],
+			'paymethod'         => $param['paymethod'],
+			'paydata'           => '크픽 협찬 구매',
+			'phone'             => $users['phone'],
+			'mobile'            => $users['mobile'],
+			'email'             => $users['email'],
+			'pay_path'          => "WEB",
+			'mem_language'      => "kor",
+			'mem_type'          => ($users['mem_type']) ? $users['mem_type'] : "PERSON",
+			'bank_name' 		=> $param['banker'],
+			'banker' 			=> $param['banker'],
+			'banker_account' 	=> $param['banker_account'],
+			'link_url' 			=> $param['link_url'],
+			'link_id'			=> $param['link_id'],
+		);
+		$this->oordercreate->insert_temporder($orders);
+		file_save_log("openapi_cpick_online_order_".date('Ymd'), "create_order_temp : ".json_encode($this->encodeUTF8($orders)));
+	}
+
+	function create_order_msg_temp($param){
+		$ordermsg = array(
+			'ordernum'          => $param['ordernum'],
+			'tempid'		=> $param['tempid'],
+			'msg_type'		=> 'ORDER',
+			'msg'			=> $param['memo']
+		);
+
+		$this->oordercreate->insert_tempmsg($ordermsg);
+	}
+	function create_basket_temp($param)
+	{
+		if (is_array($param['baskets'])) {
+			foreach ($param['baskets'] as $index => $basket)
+			{
+				$baskets = array_merge(array(
+					'tempid' => $param['tempid'],
+					'delivery_num' => $param['delivery_num'],
+					'link_id' => $param['link_id'],
+					'stock_chk' => 'NOT',
+					'basket_status' => $param['basket_status'],
+					'smartpickup_store_uid' => $param['store_id']
+				), $this->define_product($basket));
+				$this->oordercreate->insert_temporderbasket($baskets);
+				file_save_log("openapi_cpick_online_order_".date('Ymd'), "create_basket_temp : ".json_encode($this->encodeUTF8($baskets)));
+			}
+		}
+	}
+
+	function define_product($basket)
+	{
+		$productObj = new Product($this->adminuser);
+		$productObj->set_uid($basket['product_uid']);
+		$products = (array) $productObj->get();
+		$options = $this->define_product_option($basket['product_uid'], $basket['prd_option_uid']);
+		return array(
+			'product_uid'       => ($products['uid'])?$products['uid']:"999999",
+			'prd_option_uid'    => $basket['prd_option_uid'],
+			'brandcode'         => $products['brandcode'],
+			'product_name'      => strlen($basket['product_name']) ? $basket['product_name'] : $products['brandname'],
+			'basket_stock'      => ($basket['stock']) ? $basket['stock'] : 1,
+			'product_price'     => $basket['price'],
+			'product_buyprice'  => $products['buyprice'],
+			'product_cate1'     => substr($products['brandcode'], 0, 3),
+			'sell_price'        => $basket['price']*$basket['stock'],
+			'product_reserve'   => strlen($basket['reserve']) ? $basket['reserve'] : 0,
+			'option_data'       => $options['option_data'],
+			'api_option_data'   => $options['option_data'],
+			'option_type'       => $options['option_type'],
+			'provider'          => $products['provider'],
+		);
+	}
+
+	function define_product_option($product_uid, $sto_id)
+	{
+		$ProductOption = new ProductOption($this->adminuser, $product_uid);
+		$options = $ProductOption->get();
+		$sto_price = 0;
+		$prd_option_uid = $option_data = '';
+		$option_type = $products['option_type'];
+		if ($option_type != 'DIY' && $option_type != 'HYBRID') {
+			$option_type = $ProductOption->is_exist() === true ? 'PS' : 'NO';
+		}
+		for ($j=0; $j<count($options['stock']); $j++) {
+			if ($options['stock'][$j]->sto_id == $sto_id) {
+				$opt_ids = explode(",", $options['stock'][$j]->opt_ids);
+				$opt_values = explode(",", $options['stock'][$j]->opt_values);
+				$sto_price = $options['stock'][$j]->sto_price;
+				$prd_option_uid = $options['stock'][$j]->sto_id;
+				$option_type = $options['stock'][$j]->sto_type;
+				break;
+			}
+		}
+
+		$option_data = '';
+		$optIdx = 0;
+		for ($j=0; $j<count($options['option']); $j++) {
+			if (is_array($opt_ids) && in_array($options['option'][$j]->opt_id, $opt_ids)) {
+				$option_data .= "{$options['option'][$j]->opt_name} : {$opt_values[$optIdx]}, ";
+				$optIdx++;
+			}
+		}
+		$option_data = substr($option_data, 0, -2);
+
+		if ($sto_price > 0) {
+			$option_data .= "(+{$sto_price})";
+		} else if ($sto_price < 0) {
+			$option_data .= "(-{$sto_price})";
+		}
+		return array(
+			'option_data' => $option_data,
+			'option_type' => $option_type
+		);
+	}
+
+	//y 확인후 수정 필요
+	function define_user($param)
+	{
+		$user_id = $param['user_id'];
+		$users = $this->find_by_userid($user_id);
+		$is_user = is_array($users) && $users['dormant'] === 'N' && $users['id'] === $user_id ? true : false;
+		return array(
+			'is_user' => $is_user,
+			'user_id' => $users['id'],
+			'group_id' => $is_user ? $users['group_id']:'',
+			'reserve' => $is_user ? $users['reserve'] : $param['receiver'],
+			'sender' => $is_user ? $users['hname'] : $param['sender'],
+			'phone' => $is_user ? $users['hphone'] : $param['phone'],
+			'mobile' => $is_user ? $users['etcphone'] : $param['mobile'],
+			'email' => $is_user ? $users['email'] : $param['email'],
+		);
+	}
+
+	function update_user_order_date($user_id, $date)
+	{
+		$sql = <<<SQL
+            UPDATE `user`
+               SET `orderdate` = '{$date}'
+             WHERE `adminuser` = '{$this->adminuser}'
+               AND `id` = '{$user_id}'
+SQL;
+		return query($sql, $this->localdb);
+	}
+
+	function create_add_fields($param)
+	{
+		require_once "{$_ENV['PATH_FUNC']}/create_tempid.func.html";
+		$tempid = create_tempid();
+		$etc = $this->etcInformation();
+	return array(
+			'tempid' => $tempid,
+			'ordernum' => gen_ordernum(),
+			'delivery_num' => gen_deliverynum(),
+			'barcode' => $this->make_barcode($etc['order_max_barcode']),
+			'paymethod' => $param['paymethod'],
+			'basket_status' => 'D13',
+			'date' => date('YmdHis'),
+			'order_date' => date('Y-m-d H:i:s'),
+			'link_id' => $param['link_id']
+		);
+	}
+
+	function make_barcode($order_max_barcode)
+	{
+		$maxcode = "";
+		$date = date('Ymd');
+		if (substr("2".$order_max_barcode, 0, 8) == $date) {
+			$maxcode = $order_max_barcode;
+		}
+		return strlen($maxcode) == 0 ? substr($date, 1)."00001" : substr($date, 1).substr("0000".(substr($maxcode, -5) + 1), -5);
+	}
+
+
+}
+
