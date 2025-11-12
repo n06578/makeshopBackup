@@ -1,0 +1,1851 @@
+<?php
+/***********************************************************************************************************************************
+CREATE BY KSS
+주문금액 제어 클래스
+************************************************************************************************************************************/
+
+require_once $_ENV['PATH_LIB'] . '/oo_log.lib.html';
+require_once $_ENV['PATH_LIB'] . '/oo_basket.lib.html';
+require_once $_ENV['PATH_LIB'] . '/oo_delivery.lib.html';
+require_once $_ENV['PATH_LIB']. "/oo_cashbill.lib.html";
+require_once $_ENV['PATH_FUNC']."/oo_pub.func.html";
+require_once $_ENV['PATH_FUNC']."/oo_mail.func.html";
+require_once $_ENV['PATH_FUNC']."/franchise.func.html";
+require_once $_ENV['PATH_FUNC']. "/file_save_log.func.html";
+require_once $_ENV['PATH_FUNC']."/save_sql.func.html";
+//메일 내용 치환
+require_once "{$_ENV['PATH_FUNC']}/get_mail_str_replace.func.html";
+require_once "{$_ENV['PATH_FUNC']}/safe_number.func.html";
+require_once $_ENV['PATH_LIB']. "/adminuser_special.lib.html";
+require_once $_ENV['PATH_LIB']. "/smartpickup.lib.html";//스마트픽업
+require_once "{$_ENV['PATH_LIB']}/warning_info_sms.lib.html";
+
+Class OrderPrice
+{
+    var $admin_id;
+	var $ordernum;
+	var $localdb;
+	var $logHandle;
+	var $usedmenu;
+	var $more_option;
+    var $is_fran;
+
+	//생성자//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	function OrderPrice($adminuser, $ordernum){
+		if (!$adminuser || !$ordernum){
+				$this->alert_error("초기화 실패");
+				return;
+		}
+        $this->localdb = get_db_connection('premium');
+        if (!is_resource($this->localdb)) {
+				$this->alert_error("초기화 실패");
+				return;
+        }
+
+		$this->admin_id = $adminuser;
+		$this->ordernum = $ordernum;
+
+		$this->logHandle = new logLib($adminuser, $ordernum);
+		$this->usedmenu = get_ordermenu_style($adminuser);
+
+        $this->typeHandle = getShopType($adminuser);
+        $this->is_fran    = ($this->typeHandle !== false) ? $this->typeHandle : 'N';
+
+	}
+	//생성자//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	//상점추가옵션 가져오기 (현금영수증)
+	function get_order_more_option($admin_id = null){
+		if(!$this->localdb) $this->localdb = get_db_connection('premium');
+		if($admin_id) $this->admin_id = $admin_id;
+
+		$sql = <<<SQL
+			SELECT
+				`cashbilltype`
+				,`cashbillmoney`
+			FROM
+				`etc`
+			WHERE
+				`adminuser` = '{$this->admin_id}'
+SQL;
+		$res = query($sql,$this->localdb, true);
+		$row = mysql_fetch_assoc($res);
+			$more_option = array('cashbilltype' => $row['cashbilltype'],'cashbillmoney' => $row['cashbillmoney']);
+		mysql_free_result($res);
+
+		$this->more_option = $more_option;
+
+		if($admin_id) return $more_option;
+	}
+
+
+    /**
+     * 무통장 입금 취소
+     * @param <type> $price
+     * @param <type> $other_ordernum
+     */
+    function act_undobankpay($price, $other_ordernum=null) {
+    	//다중처리시 주문번호 변경
+		$old_ordernum = $this->ordernum;
+		if($other_ordernum) $this->ordernum = $other_ordernum;
+
+        $sql = <<<SQL
+        UPDATE `oo_order`
+           SET `pay_date` = ''
+             , `pay_status` = 'N'
+         WHERE `adminuser` = '{$this->admin_id}'
+           AND `ordernum` = '{$this->ordernum}'
+           AND `paymethod` IN ('B','M')
+           AND `pay_status` = 'Y'
+SQL;
+        $res = query($sql, $this->localdb, true);
+		$rescnt = mysql_affected_rows();
+
+        if ($res === false || $rescnt == 0) {
+			$this->ordernum = $old_ordernum;
+            return false;
+        }else{
+
+			$usedmenu = $this->usedmenu;
+			if($usedmenu['product_standby']=='N'){
+				//S11 상태 처리
+				$statusHandle = new basketStatus($this->admin_id, $this->ordernum);
+				$statusHandle->set_status_by_ordernum('S11', null, '입금취소로인한 처리','D11');
+			}
+			$this->ordernum = $old_ordernum;
+			return true;
+		}
+    }
+
+    /**
+     * 무통장 입금 완료
+     * @param <type> $price
+     * @return <type>
+     */
+    function act_bankpay($price, $other_ordernum=null, $hand=NULL) {
+
+		//다중처리시 주문번호 변경
+		$old_ordernum = $this->ordernum;
+		if($other_ordernum) $this->ordernum = $other_ordernum;
+
+        $sql = <<<SQL
+        UPDATE `oo_order`
+           SET `pay_date` = NOW()
+             , `pay_status` = 'Y'
+         WHERE `adminuser` = '{$this->admin_id}'
+           AND `ordernum` = '{$this->ordernum}'
+           AND `paymethod` IN ('B','M','S','G') /* 국민 에스크로 포함*/
+           AND `pay_status` = 'N'
+		   AND `bank_account` not like '[가상]%'
+SQL;
+        $res = query($sql, $this->localdb, true);
+		$rescnt = mysql_affected_rows();
+
+        if ($res === false || $rescnt == 0) {
+			$this->ordernum = $old_ordernum;
+            return false;
+        }else{
+            $this->set_safe_phone();     
+            $war_obj   = new WarningInfoSms($this->admin_id, $this->ordernum);
+            $war_config = $war_obj->get_sms_config();
+            if ($war_config->warning_info == "Y" && $war_config->time_config == "P") {
+                $war_res = $war_obj->send_warning_sms("oo");
+            }
+            // 상점 특정 회원 SMS 발송 안되서 확인 로그 작업 - eskim
+            $file_log = "pay_sms_log".date("Ymd");
+            $temp_sms_log = "[bankpay-START]".$admin_id." [".$this->ordernum."]";
+            file_save_log($file_log, $temp_sms_log, 0);
+			
+            $usedmenu = $this->usedmenu;
+			if($usedmenu['product_standby']=='N'){
+				//D11 상태 처리
+				$statusHandle = new basketStatus($this->admin_id, $this->ordernum);
+				$statusHandle->set_status_by_ordernum('D11', null, '입금으로인한 배송준비 처리','S11');
+                //유의사항 배송준비중설정일때
+                $war_obj   = new WarningInfoSms($this->admin_id, $this->ordernum);
+                $war_config = $war_obj->get_sms_config();
+                if ($war_config->warning_info == "Y" && $war_config->time_config == "D") {
+                    $war_res = $war_obj->send_warning_sms("oo");
+                }
+			}
+
+            // 메이크프랜) 아모레 퍼시픽 적립금 지급 시점 커스터마이징 
+            if ($this->is_fran != 'N') {
+                if (checkOfficeId($this->admin_id, array('IBR2013', 'luxisfun', 'beebank02')) === true) {
+                    $sub_id = get_subid();
+                    set_reserve_data($this->admin_id, $this->ordernum, 'ALL', 'proc_deli_end', $sub_id, '+');
+                }  
+            }
+            $paymethod = $this->get_paymethod();
+			$this->logHandle->set_pay_log('PAY', $price, $paymethod, $this->ordernum, NULL, $hand);
+
+			$this->get_order_more_option();
+			if ($this->more_option['cashbilltype']=='Y' && false == in_array($paymethod, array('S', 'G'))) {
+                global $cashbillHandler;
+                if(!$cashbillHandler) $cashbillHandler = new CashBill($this->admin_id, $this->localdb);
+                $cashbillHandler->request($this->ordernum, 'A',$this->more_option['cashbillmoney']);
+			}
+            file_save_log($file_log, '[현금영수증-완료]', 0);
+
+            //스마트픽업 품목 처리 시작 : S11 > D15
+            $smartPickUpHandle = new SmartPickUp($this->admin_id);
+            $smartPickUpHandle->get_config();
+            if ($smartPickUpHandle->smartpickup_use == 'Y') {
+                $smartPickUpHandle->smartpickup_processing($this->ordernum);
+            }
+            //스마트픽업 품목 처리 종료
+
+			//입금확인 SMS - class 안에서 옵션 판단
+			$smsHandle = new ooSMS($this->admin_id, $this->ordernum,'bank');
+			$smsHandle->send_SMS();
+            file_save_log($file_log, '[SMS-완료]', 0);
+
+			//입금확인 메일
+			send_bankmail($this->admin_id,$this->ordernum);
+            file_save_log($file_log, '[MAIL-완료]', 0);
+
+            $temp_sms_log = "[bankpay-END]".$admin_id." [".$this->ordernum."]";
+            file_save_log($file_log, $temp_sms_log, 0);
+
+            if (AdminuserSpecial::use_content_link($this->admin_id) || AdminuserSpecial::is_use_gift_card($this->admin_id)) {
+                $oodata_baskets = OrderData::get_basket_datas($this->admin_id, $this->ordernum, $this->localdb);
+                $total_emoney_product = 0;
+                foreach ($oodata_baskets as $k => $value) {
+                    unset($newstatus);
+                    if (($value['match_title'] == "CONTENTS_USE" && $value['option_type'] != 'BUNDLE') || $value['product_type'] == 'GIFTCARD') {
+                        $newstatus[$value['num']] = 'D15';
+                        $basketHandle = new basketStatus($this->admin_id, $this->ordernum);
+                        $ret  = $basketHandle->set_status($newstatus, null, '다운로드 상품 배송중 처리');
+                        if ($ret > 0) {
+                            $deliHandle = new OODelivery($this->admin_id);
+                            $deliverynums[0] = $value['delivery_num'];
+                            $return_array = $deliHandle->proc_deli_complete($deliverynums,'다운로드 상품 배송완료 처리');
+                            // 예치금 상품권 가격 합산
+                            if ($value['product_type'] == 'GIFTCARD') {
+                                $total_emoney_product += $value['consumerprice'];
+                            }
+                        }
+                    }
+                }
+                // 예치금 지급 금액이 0원 이상일 경우에만 처리
+                if (AdminuserSpecial::is_use_gift_card($this->admin_id) && $total_emoney_product > 0) {
+                    $order_sql = <<<SQL
+                        SELECT `id`
+                          FROM `oo_order` 
+                         WHERE `adminuser`  = '{$this->admin_id}' 
+                           AND `ordernum`   = '{$this->ordernum}'
+SQL;
+                    $order_res = query($order_sql, $this->localdb, true);
+                    if ($order_res !== false) {
+                        $order_row  = mysql_fetch_object($order_res);
+                        $user_id    = $order_row->id;
+                        // 회원일경우에만 처리
+                        if (strlen($user_id) > 0) {
+                            require_once "{$_ENV['PATH_LIB']}/emoney_data.lib.html";
+                            $emoneyHandle = new Emoney($this->admin_id);
+                            $emoney_param = array (
+                                    'user_id' => $user_id,
+                                    'title'   => '예치금 상품권 전용 - 예치금 지급',
+                                    'amount'  => $total_emoney_product, 
+                                    'ordernum'  => $this->ordernum,
+                                    'subid'     => 'INPAY'
+                                    );
+                            $sleep_time = substr($total_emoney_product,0,2).substr($this->ordernum, 17, 5);
+                            save_sql("########## 예치금 상품권 예치금 지급 {$this->ordernum} {$sleep_time} 시작 {$total_emoney_product}");
+
+                            // sleep_time에서 앞자리 하나만 짤라서 초단위 sleep() 처리
+                            sleep(substr($sleep_time, 0, 1));
+
+                            // sleep_time에서 나머지는 usleep() 처리, 앞자리가 0이면 공백 처리
+                            // 같은 금액의 예치금일 수 있어서 나노슬립 처리도 함께 함
+                            usleep(ltrim(substr($sleep_time, 1), '0'));
+
+                            $emoney_res = $emoneyHandle->insert_data_emoney($emoney_param);
+                            if ($emoney_res === false) {
+                                save_sql("########## 예치금 상품권 예치금 지급 실패 중복 등.. {$this->ordernum}, 금액 {$total_emoney_product}");
+                            }
+                            save_sql("########## 예치금 상품권 예치금 지급 {$this->ordernum} 끝");
+                        }
+                    }
+                }
+
+            }
+            // YK - 선물하기 / SMS, 알림톡 SEND
+            // present
+            require_once "{$_ENV['PATH_LIB']}/present_manage.lib.html";
+            $pm = new PresentManage($this->admin_id);
+            $present_info = $pm->getList(" AND `ordernum`='{$this->ordernum}'");
+            if ($present_info) {
+                PresentManage::set_alimtalk($this->admin_id, 'present_complete', $this->ordernum, 'P');
+                PresentManage::set_alimtalk($this->admin_id, 'receive_present', $this->ordernum);
+                $is_present_config = $pm->get_present_config();
+                $present_etc_info = ($is_present_config !== false && count($is_present_config) > 0) ? $is_present_config : $pm->get_etc_present_info();
+                $present_enddate = date('Y-m-d', strtotime('+'.$present_etc_info->present_approval_enddate.' days'));
+                $pm->updatePresent(array('approval_enddate' => $present_enddate), " AND `ordernum` = '{$this->ordernum}'");
+            }
+
+            if (AdminuserSpecial::is_epson($this->admin_id)) {
+                require_once $_ENV['PATH_LIB'] . '/epson.lib.html';
+                $eps = new Epson($this->admin_id);
+
+                $order_row  = get_order_info($this->admin_id, $this->ordernum); // oo_pub.func.html
+                $cover_res = $eps->get_coverplus(array('select' => 'COUNT(*) AS `cnt`', 'where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum, 'coverplus_status' => 'UNPAID')));
+                $cover_row = mysql_fetch_object($cover_res);
+                if ($cover_row->cnt > 0) { 
+                    $eps->update_coverplus(array('where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum), 'set' => array('coverplus_status' => 'STANDBY')));
+                }
+                $warranty_res = $eps->get_warranty(array('select' => 'COUNT(*) AS `cnt`', 'where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum, 'warranty_status' => 'UNPAID')));
+                $warranty_row = mysql_fetch_object($warranty_res);
+                if ($warranty_row->cnt > 0) { 
+                    $eps->update_warranty(array('where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum), 'set' => array('warranty_status' => 'APPLY')));
+                }
+                // 엡손코리아 커버플러스 상품 구매 시 '구매완료' 상태로 업데이트 --- 25.03.24 업체요청으로 주석처리
+                //$eps->make_coverplus_delivery_end($this->ordernum);
+                unset($order_row, $cover_res, $cover_row, $up_res, $up_row, $warranty_res, $warranty_row);
+            }
+			$this->ordernum = $old_ordernum;
+
+            return true;
+		}
+    }
+
+	// 무통장 입금외 입금메쏘드
+    //2011.10.14 취소된 주문서가 입금확인되는 경우 발생 조건 추가함
+    function act_etc_pay($admin_id, $ordernum, $paymethod, $mail=false, $sms=false, $cashbill=false) {
+
+		if(!$this->localdb) $this->localdb = get_db_connection('premium');
+		if(!$this->logHandle) $this->logHandle = new logLib($admin_id, $ordernum);
+
+        //pg에스크로 현금영수증 신청안함 admin_card_flag Y로 처리함
+        if($paymethod == "S") {
+            $cashbill = false;
+            $escrow_add =", `admin_card_flag` = 'Y'";//pg에스크로 입금전 N,입금 Y,취소C
+        }
+
+        $sql = <<<SQL
+        UPDATE `oo_order`
+           SET `pay_date` = NOW()
+             , `pay_status` = 'Y'
+            {$escrow_add}
+         WHERE `adminuser` = '{$admin_id}'
+           AND `ordernum` = '{$ordernum}'
+		   AND `paymethod` = '{$paymethod}'
+           AND `pay_status` IN ('N', 'C')
+SQL;
+        $res = query($sql, $this->localdb, true);
+		$rescnt = mysql_affected_rows();
+
+        // 간헐적으로 재호출되는 경우 oo_pay_log가 안들어가서 체크 추가
+        if ($res !== false && $rescnt == 0) {
+            $pay_log = $this->logHandle->get_pay_log();
+            if (count($pay_log) == 1 && $pay_log[0]['pay_type'] == '' && $pay_log[0]['pay_memo'] == '결제 대기 중') {
+                $rescnt = 1;
+            }
+        }
+
+        if ($res === false || $rescnt == 0) {
+            return false;
+        }else{
+            $this->set_safe_phone();
+            $war_obj   = new WarningInfoSms($this->admin_id, $this->ordernum);
+            $war_config = $war_obj->get_sms_config();
+            if ($war_config->warning_info == "Y" && $war_config->time_config == "P") {
+                $war_res = $war_obj->send_warning_sms("oo");
+            }
+            
+            $_order_data = $this->get_order_data();
+
+            // 상점 특정 회원 SMS 발송 안되서 확인 로그 작업 - eskim
+            $file_log = "pay_sms_log".date("Ymd");
+            $temp_sms_log = "[etc_pay-START]".$admin_id." [".$ordernum."][".$paymethod."]";
+            if($cashbill === true ) {
+                $temp_sms_log .= "[cashbill : TRUE]";
+            } else {
+                $temp_sms_log .= "[cashbill : FALSE]";
+            }
+            if($sms === true) {
+                $temp_sms_log .= "[sms : TRUE]";
+            } else {
+                $temp_sms_log .= "[sms : FALSE]";
+            }
+            if($mail === true) {
+                $temp_sms_log .= "[mail : TRUE]";
+            } else {
+                $temp_sms_log .= "[mail : FALSE]";
+            }
+            file_save_log($file_log, $temp_sms_log, 0);
+
+			$usedmenu = get_ordermenu_style($admin_id);
+			if($usedmenu['product_standby']=='N'){
+				//D11 상태 처리
+				$statusHandle = new basketStatus($admin_id, $ordernum);
+                if ($_order_data['order_status'] == 'C') {
+                    $statusHandle->set_status_by_ordernum('D12', null, 'pg타임아웃으로 인한 배송보류 처리','S11');
+                } else {
+    				$statusHandle->set_status_by_ordernum('D11', null, '입금으로인한 배송준비 처리','S11');
+                }
+                // 유의사항 sms 배송준비 설정일때
+                $war_obj   = new WarningInfoSms($this->admin_id, $this->ordernum);
+                $war_config = $war_obj->get_sms_config();
+                if ($war_config->warning_info == "Y" && $war_config->time_config == "D") {
+                    $war_res = $war_obj->send_warning_sms("oo");
+                }
+			} else {
+                if ($_order_data['order_status'] == 'C') {
+                    $statusHandle = new basketStatus($admin_id, $ordernum);
+                    $statusHandle->set_status_by_ordernum('D12', null, 'pg타임아웃으로 인한 배송보류 처리','S11');
+                }
+            }
+
+			$this->logHandle->set_pay_log('PAY', $price, $paymethod, $ordernum);
+
+			if($cashbill){
+				$rval = OrderPrice::get_order_more_option($admin_id);
+				if($rval['cashbilltype']=='Y'){
+                    global $cashbillHandler;
+                    if(!$cashbillHandler) $cashbillHandler = new CashBill($admin_id, $this->localdb);
+                    $cashbillHandler->request($ordernum, 'A',$this->more_option['cashbillmoney']);
+				}
+                file_save_log($file_log, '[현금영수증-완료]', 0);
+			}
+
+            //스마트픽업 품목 처리 시작 : S11 > D15
+            $smartPickUpHandle = new SmartPickUp($this->admin_id);
+            $smartPickUpHandle->get_config();
+            if ($smartPickUpHandle->smartpickup_use == 'Y') {
+                $smartPickUpHandle->smartpickup_processing($this->ordernum);
+            }
+            //스마트픽업 품목 처리 종료
+
+			//입금확인 SMS - class 안에서 옵션 판단
+			if($sms){
+				$smsHandle = new ooSMS($admin_id, $ordernum,'bank');
+				$smsHandle->send_SMS();
+                file_save_log($file_log, '[SMS-완료]', 0);
+			}
+
+			//입금확인 메일
+			if($mail){
+				send_bankmail($admin_id,$ordernum);
+                file_save_log($file_log, '[MAIL-완료]', 0);
+			}
+
+            // YK - 선물하기 / SMS, 알림톡 SEND
+            // present
+            require_once "{$_ENV['PATH_LIB']}/present_manage.lib.html";
+            $pm = new PresentManage($this->admin_id);
+            $present_info = $pm->getList(" AND `ordernum`='{$this->ordernum}'");
+            if ($present_info) {
+                PresentManage::set_alimtalk($this->admin_id, 'present_complete', $this->ordernum, 'P');
+                PresentManage::set_alimtalk($this->admin_id, 'receive_present', $this->ordernum);
+                $is_present_config = $pm->get_present_config();
+                $present_etc_info = ($is_present_config !== false && count($is_present_config) > 0) ? $is_present_config : $pm->get_etc_present_info();
+                $present_enddate = date('Y-m-d', strtotime('+'.$present_etc_info->present_approval_enddate.' days'));
+                $pm->updatePresent(array('approval_enddate' => $present_enddate), " AND `ordernum` = '{$this->ordernum}'");
+            }
+            
+            $temp_sms_log = "[etc_pay-END]".$admin_id." [".$ordernum."]";
+            file_save_log($file_log, $temp_sms_log, 0);
+            if (AdminuserSpecial::use_content_link($this->admin_id) || AdminuserSpecial::is_use_gift_card($this->admin_id)) {
+                $oodata_baskets = OrderData::get_basket_datas($this->admin_id, $this->ordernum, $this->localdb);
+                $total_emoney_product = 0;
+                foreach ($oodata_baskets as $k => $value) {
+                    unset($newstatus);
+                    if (($value['match_title'] == "CONTENTS_USE" && $value['option_type'] != 'BUNDLE') || $value['product_type'] == 'GIFTCARD') {
+                        $newstatus[$value['num']] = 'D15';
+                        $basketHandle = new basketStatus($this->admin_id, $this->ordernum);
+                        $ret  = $basketHandle->set_status($newstatus, null, '다운로드 상품 배송중 처리');
+                        if ($ret > 0) {
+                            $deliHandle = new OODelivery($this->admin_id);
+                            $deliverynums[0] = $value['delivery_num'];
+                            $return_array = $deliHandle->proc_deli_complete($deliverynums,'다운로드 상품 배송완료 처리');
+                            // 예치금 상품권 가격 합산
+                            if ($value['product_type'] == 'GIFTCARD') {
+                                $total_emoney_product += $value['consumerprice'];
+                            }
+                        }
+                    }
+                }
+                if (AdminuserSpecial::is_use_gift_card($this->admin_id) && $total_emoney_product > 0) {
+                    $order_sql = <<<SQL
+                        SELECT `id`
+                          FROM `oo_order` 
+                         WHERE `adminuser`  = '{$this->admin_id}' 
+                           AND `ordernum`   = '{$this->ordernum}'
+SQL;
+                    $order_res = query($order_sql, $this->localdb, true);
+                    if ($order_res !== false) {
+                        $order_row  = mysql_fetch_object($order_res);
+                        $user_id    = $order_row->id;
+                        // 회원일경우에만 처리
+                        if (strlen($user_id) > 0) {
+                            require_once "{$_ENV['PATH_LIB']}/emoney_data.lib.html";
+                            $emoneyHandle = new Emoney($this->admin_id);
+                            $emoney_param = array (
+                                    'user_id' => $user_id,
+                                    'title'   => '예치금 상품권 전용 - 예치금 지급',
+                                    'amount'  => $total_emoney_product, 
+                                    'ordernum'  => $this->ordernum,
+                                    'subid'     => 'INPAY'
+                                    );
+                            $sleep_time = substr($total_emoney_product,0,2).substr($this->ordernum, 17, 5);
+                            save_sql("########## 예치금 상품권 예치금 지급 {$this->ordernum} {$sleep_time} 시작 {$total_emoney_product}");
+
+                            // sleep_time에서 앞자리 하나만 짤라서 초단위 sleep() 처리
+                            sleep(substr($sleep_time, 0, 1));
+
+                            // sleep_time에서 나머지는 usleep() 처리, 앞자리가 0이면 공백 처리
+                            // 같은 금액의 예치금일 수 있어서 나노슬립 처리도 함께 함
+                            usleep(ltrim(substr($sleep_time, 1), '0'));
+                            
+                            $emoney_res = $emoneyHandle->insert_data_emoney($emoney_param);
+                            if ($emoney_res === false) {
+                                save_sql("########## 예치금 상품권 예치금 지급 실패 중복 등.. {$this->ordernum}, 금액 {$total_emoney_product}");
+                            }
+                            save_sql("########## 예치금 상품권 예치금 지급 {$this->ordernum} 끝");
+                        }
+                    }
+                }
+
+            }
+
+            if (AdminuserSpecial::is_epson($this->admin_id)) {
+                require_once $_ENV['PATH_LIB'] . '/epson.lib.html';
+                $eps = new Epson($this->admin_id);
+
+                $order_row  = get_order_info($this->admin_id, $this->ordernum); // oo_pub.func.html
+                $cover_res = $eps->get_coverplus(array('select' => 'COUNT(*) AS `cnt`', 'where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum, 'coverplus_status' => 'UNPAID')));
+                $cover_row = mysql_fetch_object($cover_res);
+                if ($cover_row->cnt > 0) { 
+                    $eps->update_coverplus(array('where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum), 'set' => array('coverplus_status' => 'STANDBY')));
+                }
+
+                $warranty_res = $eps->get_warranty(array('select' => 'COUNT(*) AS `cnt`', 'where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum, 'warranty_status' => 'UNPAID')));
+                $warranty_row = mysql_fetch_object($warranty_res);
+                if ($warranty_row->cnt > 0) { 
+                    $eps->update_warranty(array('where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum), 'set' => array('warranty_status' => 'APPLY')));
+                }
+                // 엡손코리아 커버플러스 상품 구매 시 '구매완료' 상태로 업데이트 --- 25.03.24 업체요청으로 주석처리
+                //$eps->make_coverplus_delivery_end($this->ordernum);
+                unset($order_row, $cover_res, $cover_row, $up_res, $up_row, $warranty_res, $warranty_row);
+            }
+
+            //주문 상태 변경 입금확인 웹훅
+            $webhook_status = '';
+            if($usedmenu['product_standby']=='N'){
+                $webhook_status = $_order_data['order_status'] == 'C' ? 'D12' : 'D11';
+			}
+            if (isset($newstatus)) {
+                $webhook_status = 'D15';
+            }
+            require_once $_ENV['PATH_LIB']."/webhook_openapi.lib.html";
+            $webhook_openapi = new WebhookOpenapi($this->admin_id);
+            $webhook_openapi->webhookEventHandler('order_status', array(
+                'id' => 'wbop2', 
+                'status' => strlen($webhook_status) ? 'D12' : $webhook_status, 
+                'orders' => array(array('ordernum'=>$this->ordernum)))
+            );
+
+			return true;
+		}
+    }
+
+
+
+	// 재결제 완료
+    function act_bankrepay($price, $other_ordernum=null, $hand=NULL) {
+
+		//다중처리시 주문번호 변경
+		$old_ordernum = $this->ordernum;
+		if($other_ordernum) $this->ordernum = $other_ordernum;
+
+		//금액 트랜젝션 체크
+		$sql =<<<SQL
+			SELECT
+				`repay_price`,
+                `order_date`
+			FROM
+				`oo_order`
+			WHERE
+				`adminuser` = '{$this->admin_id}'
+				AND `ordernum` = '{$this->ordernum}'
+SQL;
+		$res = query($sql, $this->localdb, true);
+		$row=mysql_fetch_assoc($res);
+		$repay_price = $row['repay_price'];
+        $order_date = $row['order_date'];
+		mysql_free_result($res);
+
+		if($repay_price!=$price){
+			$this->ordernum = $old_ordernum;
+			 return array(false,'금액오류 - 재결제 금액이 변경되었습니다. 확인후 다시 입금확인 하시기 바랍니다.');
+		}
+
+        //재결제정보 가져오기 및 트랜잭션 체크
+        //  - 적립금/예치금으로는 접수창에서 바로 처리하고 있음.
+        //  - '배송비 환불액' 설정값이 있는 경우 `oo_order`.`deli_price` 갱신해야 함.
+        $sql = <<<SQL
+            SELECT `refund_uid`, `refund_deli_price`, `refund_method`
+              FROM `oo_refund`
+             WHERE `adminuser`  = '{$this->admin_id}'
+               AND `ordernum`   = '{$this->ordernum}'
+               AND `refund_type` = 'REPAY'
+               AND `refund_status` = 'STANDBY'
+         LIMIT 1
+SQL;
+        if(!($res = query($sql, $this->localdb, true)) || !($row = mysql_fetch_object($res))) {
+            return array(false, '해당 [재결제 등록 내역]이 없거나 이미 처리되었습니다.');
+        }
+        $refund_uid         = $row->refund_uid;
+        $refund_method      = $row->refund_method;
+        $refund_deli_price  = intval($row->refund_deli_price);
+        /* 
+            it : 재입금완료 안되는 현상 http://it.makeshop.co.kr/makeshop/?id=11936 
+            발생으로 인해 주석처리함. 
+
+        if($refund_method != "B") {
+            return array(false, '[은행입금] 재결제가 아닙니다.');   //<= 여기에 걸리는 일은 없을 듯..혹시나.
+        }
+        */
+
+
+        // `oo_order` Update!!!
+        if($refund_deli_price > 0) $add_set = ", `deli_price` = `deli_price` - {$refund_deli_price} ";
+        $sql = <<<SQL
+        UPDATE `oo_order`
+           SET `repay_date` = NOW()
+             , `repay_price` = 0 {$add_set}
+         WHERE `adminuser` = '{$this->admin_id}'
+           AND `ordernum` = '{$this->ordernum}'
+SQL;
+        $res = query($sql, $this->localdb, true);
+        if ($res === false) {
+			$this->ordernum = $old_ordernum;
+            return array(false,'DB오류');
+        }
+
+		//대상상품 상태 처리용
+		$usedmenu = $this->usedmenu;
+		if($usedmenu['product_standby']=='N'){
+			$sql = <<<SQL
+				SELECT
+					`num`, `basket_status`
+				FROM
+					`oo_basket`
+				WHERE `adminuser` = '{$this->admin_id}'
+		   AND `ordernum` = '{$this->ordernum}'
+		   AND `issue_status` = 'REPAY1'
+SQL;
+			$res = query($sql, $this->localdb, true);
+			if($res){
+				while($row=mysql_fetch_assoc($res)){
+					$basket[$row['num']] = 'D11';
+				}
+			}
+		}
+
+		// 스크래치 관리
+		 $sql = <<<SQL
+		UPDATE `oo_basket`
+		   SET `issue_status` = 'REPAY7'
+		 WHERE `adminuser` = '{$this->admin_id}'
+		   AND `ordernum` = '{$this->ordernum}'
+		   AND `issue_status` = 'REPAY1'
+SQL;
+		   //AND `issue_status` IN ('REPAY1','REFUNDC')
+		$res = query($sql, $this->localdb, true);
+		if ($res === false) {
+			$this->ordernum = $old_ordernum;
+			return array(false,'DB오류');
+		}
+
+
+		//큐완료
+		$sql = <<<SQL
+		UPDATE `oo_refund`
+		   SET `status_date` = NOW()
+			 , `refund_status` = 'COMPLETE'
+		 WHERE `adminuser` = '{$this->admin_id}'
+           AND `refund_uid` = '{$refund_uid}'
+		   AND `ordernum` = '{$this->ordernum}'
+		   AND `refund_type` = 'REPAY'
+		   AND `refund_status` = 'STANDBY'
+SQL;
+		$res = query($sql, $this->localdb, true);
+		$rescnt = mysql_affected_rows();
+
+		if ($res === false || $rescnt == 0) {
+			$this->ordernum = $old_ordernum;
+			return array(false,'DB오류');
+		}else{
+			$usedmenu = $this->usedmenu;
+			if($usedmenu['product_standby']=='N'){
+				//D11 상태 처리
+				$statusHandle = new basketStatus($this->admin_id, $this->ordernum);
+				$statusHandle->set_status($basket, null, '입금으로인한 배송준비 처리');
+			}
+
+            if(!is_array($_ENV)){
+                global $_ENV;
+            }           
+
+            $order_sql = <<<SQL
+                select * from oo_order where adminuser = '{$this->admin_id}' and ordernum = '{$this->ordernum}'
+SQL;
+            $order_res = query($order_sql, $this->localdb, true);
+            $order_row = mysql_fetch_assoc($order_res);
+
+            $shopname       = (strlen($_ENV['ADMIN']->shopname) > 0) ? $_ENV['ADMIN']->shopname : "";
+            $_order_date    = substr($order_row['order_date'], 0, 10);
+
+            //스마트픽업 품목 처리 시작 : S11 > D15
+            $smartPickUpHandle = new SmartPickUp($this->admin_id);
+            $smartPickUpHandle->get_config();
+            if ($smartPickUpHandle->smartpickup_use == 'Y') {
+                $smartPickUpHandle->smartpickup_processing($this->ordernum);
+            }
+            //스마트픽업 품목 처리 종료
+
+            //제결재 확인 sms발송부분            
+            $smsHandle = new ooSMS($this->admin_id, $this->ordernum, 'repay_complate');
+            $smsHandle->get_sms_option();
+
+            $_bank_name = ($order_row['paymethod'] == 'B') ? "[".$order_row['bank_name']."] ".$order_row['bank_account'] : "";
+            
+            $replace_hname = mail_replace_text($order_row['sender'],"name");
+            $replace = array($smsHandle->smsoption->sms_username, $replace_hname, number_format($repay_price), $_order_date, $_bank_name);
+
+			$smsHandle->send_SMS(null, $replace);
+            //유의사항 재전송
+            $war_obj   = new WarningInfoSms($this->admin_id, $this->ordernum);
+            $war_config = $war_obj->get_sms_config();
+            if ($war_config->warning_info == "Y" && $war_config->time_config == "P") {
+                $war_res = $war_obj->send_warning_sms("oo");
+            }
+
+            $pay_memo = 'TRADE';
+			$this->logHandle->set_pay_log('REPAY', $price, $refund_method, $this->ordernum, NULL, $hand, $pay_memo);
+			$this->ordernum = $old_ordernum;
+
+            //** 환불완료시 세금계산서  신청처리 **//
+            require_once "{$_ENV['PATH_LIB']}/taxbill.lib.html";
+            $taxbill = new Taxbill($this->admin_id, 'oo');
+            $taxbill->re_apply($this->ordernum);
+
+            //주문 상태 변경 입금확인 웹훅
+            require_once $_ENV['PATH_LIB']."/webhook_openapi.lib.html";
+            $webhook_openapi = new WebhookOpenapi($this->admin_id);
+            $webhook_openapi->webhookEventHandler('order_status', 
+                array('id' => 'wbop1', 'status' => 'D11', 'orders' => array(array('ordernum'=>$this->ordernum)))
+            );
+
+            if (AdminuserSpecial::is_epson($this->admin_id)) {
+                require_once $_ENV['PATH_LIB'] . '/epson.lib.html';
+                $eps = new Epson($this->admin_id);
+
+                $order_row  = get_order_info($this->admin_id, $this->ordernum); // oo_pub.func.html
+                $cover_res = $eps->get_coverplus(array('select' => 'COUNT(*) AS `cnt`', 'where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum, 'coverplus_status' => 'UNPAID')));
+                $cover_row = mysql_fetch_object($cover_res);
+                if ($cover_row->cnt > 0) { 
+                    $eps->update_coverplus(array('where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum, 'coverplus_status' => 'UNPAID'), 'set' => array('coverplus_status' => 'STANDBY'))); // 재결제 시, 업데이트
+                }
+
+                $warranty_res = $eps->get_warranty(array('select' => 'COUNT(*) AS `cnt`', 'where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum, 'warranty_status' => 'UNPAID')));
+                $warranty_row = mysql_fetch_object($warranty_res);
+                if ($warranty_row->cnt > 0) { 
+                    $eps->update_warranty(array('where' => array('user_id' => $order_row['id'], 'ordernum' => $this->ordernum), 'set' => array('warranty_status' => 'APPLY')));
+                }
+                // 엡손코리아 커버플러스 상품 구매 시 '구매완료' 상태로 업데이트 --- 25.03.24 업체요청으로 주석처리
+                //$eps->make_coverplus_delivery_end($this->ordernum);
+                unset($order_row, $cover_res, $cover_row, $up_res, $up_row, $warranty_res, $warranty_row);
+            }
+
+			return array(true,1);
+		}
+    }
+
+
+
+	//미입금처리///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	function act_banknopay($ordernums){
+
+		if(is_array($ordernums)){
+			foreach($ordernums as $v){
+				if($this->chk_banknopay($v)=='pay'){
+					$new_ordernum[] = $v;
+				}else if($this->chk_banknopay($v)=='repay'){
+					$new2_ordernum[] = $v;
+				}
+			}
+		}else{
+			if(!$ordernums) return false;
+			if($this->chk_banknopay($ordernums)=='pay'){
+				$new_ordernum = $ordernums;
+			}else if($this->chk_banknopay($ordernums)=='repay'){
+				$new2_ordernum = $ordernums;
+			}
+		}
+
+		//다중 미입금처리
+		if($new_ordernum[0]){
+
+			$new_ordernum_for_inquery = implode("','",$new_ordernum);
+			$new_ordernum_for_inquery = "'".$new_ordernum_for_inquery."'";
+
+			$sql = <<<SQL
+			UPDATE `oo_order`
+			   SET `pay_date` = ''
+				 , `pay_status` = 'N'
+			 WHERE `adminuser` = '{$this->admin_id}'
+			   AND `ordernum` in ({$new_ordernum_for_inquery})
+			   AND `paymethod` IN ('B','M')
+			   AND `pay_status` = 'Y'
+               AND `link_id` != 'checkout'
+SQL;
+			$res = query($sql, $this->localdb, true);
+			$pay_affected_rows = mysql_affected_rows();
+
+			if ($res === false) {
+				return false;
+			}
+
+			$usedmenu = $this->usedmenu;
+			if($usedmenu['product_standby']=='N'){
+				//S11 상태 처리
+                foreach((array)$new_ordernum as $v3){
+                    $statusHandle = new basketStatus($this->admin_id, $v3);
+                    $statusHandle->set_status_by_ordernum('S11',null, '입금취소로인한 처리','D11');
+                }
+			}
+
+            $old_ordernum = $this->ordernum;
+            foreach((array)$new_ordernum as $v4) {
+                $this->ordernum = $v4;
+                $paymethod = $this->get_paymethod();
+	    		$this->logHandle->set_pay_log('CANCEL', null, $paymethod, $this->ordernum);
+            }
+            if ($_ENV['IS_SMART_COUPON']) {
+                require_once "{$_ENV['PATH_LIB']}/smart_coupon.lib.html";
+                $smart_coupon   = new SmartCoupon($this->admin_id);
+
+                if (is_array($new_ordernum) && count($new_ordernum) > 0) {
+                    $order_sql = <<<SQL
+                        SELECT `id`,`ordernum`
+                          FROM `oo_order` 
+                         WHERE `adminuser` = '{$this->admin_id}' 
+                           AND `ordernum` IN ({$new_ordernum_for_inquery})
+                           AND `pay_status` = 'N'
+SQL;
+                    $order_res = query($order_sql, $this->localdb, true);
+
+                    if ($order_res !== false) {
+                        while ($order_row = mysql_fetch_assoc($order_res)) {
+                            //대기리스트에 있는 ordernum 삭제
+                            $wait_list = $smart_coupon->get_wait_coupon_list($order_row['id'], array('ordernum' => $order_row['ordernum']));
+                            $user_id = $order_row['id'];
+                            if (is_array($wait_list) && count($wait_list) > 0) {
+                                $success_log = $fail_log = '';
+                                foreach ($wait_list as $list) {
+                                    $wait_res = $smart_coupon->delete_wait_coupon($user_id, $list->couponnum, $list->sca_idx);
+                                    if ($wait_res === false) {
+                                        $fail_log .= " / {$list->couponnum}, {$list->scu_idx}";
+                                    } else {
+                                        $success_log .= " / {$list->couponnum}, {$list->scu_idx}";
+                                    }
+                                }
+                                if (strlen($fail_log) > 0) {
+                                    savelogs("## 주문서 미입금 처리 ## 스마트 쿠폰 대기리스트 삭제 실패({$user_id}) {$order_row['ordernum']} {$fail_log}");
+                                } 
+                                if (strlen($success_log) > 0){
+                                    savelogs("## 주문서 미입금 처리 ## 스마트 쿠폰 대기리스트 삭제({$user_id}) {$order_row['ordernum']} {$success_log}");
+                                }
+                            }
+                            //이미 발급된 쿠폰 회수
+                            $user_coupon = $smart_coupon->get_user_coupon($user_id, array('scu_issue_ordernum' =>  $order_row['ordernum']));
+                            if (is_array($user_coupon) && count($user_coupon) > 0) {
+                                $success_log = $fail_log = '';
+                                $del_coupons = array();
+                                foreach ($user_coupon as $list) {
+                                    if (!in_array($list->sc_auto_type, array('PRODUCT_BUY','BUY_PRICE'))) {
+                                        continue;
+                                    }
+                                    if ($list->scu_used != 'Y') {
+                                        $coupon_res = $smart_coupon->delete_user_coupon($user_id, $list->couponnum, $list->scu_idx);
+                                        if ($coupon_res === false) {
+                                            $fail_log .= " / {$list->couponnum}, {$list->scu_idx}";
+                                        } else {
+                                            $success_log .= " / {$list->couponnum}, {$list->scu_idx}";
+                                            $del_coupons[] = $list->couponnum;
+                                        }
+                                    } else {
+                                        $fail_log .= " / {$list->couponnum}, {$list->scu_idx} - 쿠폰 사용완료로 회수 불가";
+                                    }
+                                }
+                                if (strlen($fail_log) > 0) {
+                                    savelogs("## 주문서 미입금 처리 ## 스마트 쿠폰 회수 실패({$user_id}) {$order_row['ordernum']} {$fail_log}");
+                                } 
+                                if (strlen($success_log) > 0){
+                                    if (is_array($del_coupons) && count($del_coupons) > 0) {
+                                        $del_coupon = implode(', ', $del_coupons);
+                                        updatelogs($order_row['ordernum'], "[쿠폰 회수] - 쿠폰번호 : {$del_coupon}");
+                                    }
+                                    savelogs("## 주문서 미입금 처리 ## 스마트 쿠폰 회수({$user_id}) {$order_row['ordernum']} {$success_log}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            $this->ordernum = $old_ordernum;
+		}
+
+		$repay_affected_rows = 0;
+
+		//재결제완료 롤백 method 콜
+		if($new2_ordernum[0]){
+			if(is_array($new2_ordernum)){
+				foreach($new2_ordernum as $v2){
+					$return = $this->rollback_repay($v2);
+					if ($return === false) {
+						return false;
+					}
+					$repay_affected_rows++;
+				}
+			}else{
+				$return = $this->rollback_repay($new2_ordernum);
+				$repay_affected_rows++;
+			}
+		}
+
+		return $pay_affected_rows+$repay_affected_rows;
+
+	}
+	//미입금처리///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+	//재결제완료 롤백 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	function rollback_repay($ordernum){
+
+        //최근 재결제 정보 가져오기
+        $repay_info = $this->get_last_pay_log($ordernum, 'REPAY');
+        if(!$repay_info) {
+            return false;
+        }
+        
+        $repay_price = $repay_info['in_pay_price'];
+        $repay_memo = $repay_info['pay_memo'];
+        
+        $target_basket_set = '';
+        $return_issue_status = '';
+        if($repay_memo == 'ADDPRODUCT') {
+            //상품추가 테이블에서 마지막 결제건 가져옴
+            $sql = <<<SQL
+                SELECT `add_prd_uid`, `basket_set`
+                FROM `oo_add_product`
+                WHERE `adminuser`  = '{$this->admin_id}'
+                AND `ordernum`   = '{$ordernum}'
+                AND `pay_status` = 'C'
+                ORDER BY `add_prd_date` DESC LIMIT 1 
+SQL;
+            $res = query($sql, $this->localdb, true);
+            $row = mysql_fetch_object($res);
+            $add_prd_uid = $row->add_prd_uid;
+            $target_basket_set = $row->basket_set;
+            $return_issue_status = 'REPAYA';
+        } else {
+            //가장 최근 교환 재결제 완료 건 가져오기
+            $sql = <<<SQL
+                SELECT `refund_method`, `refund_uid`, `basket_set`
+                FROM `oo_refund`
+                WHERE `adminuser`  = '{$this->admin_id}'
+                AND `ordernum`   = '{$ordernum}'
+                AND `refund_type` = 'REPAY'
+                AND `refund_status` = 'COMPLETE'
+                ORDER BY `status_date` DESC LIMIT 1
+SQL;
+            $res = query($sql, $this->localdb, true);
+            $row = mysql_fetch_object($res);
+            $refund_method =  $row->refund_method;
+            $refund_uid    =  $row->refund_uid;
+            $target_basket_set = $row->basket_set;
+            $return_issue_status = 'REPAY1';
+        }
+
+		//대상상품 상태 처리용
+		$usedmenu = $this->usedmenu;
+		if($usedmenu['product_standby']=='N'){
+			$sql = <<<SQL
+				SELECT
+					`num`, `basket_status`
+				FROM
+					`oo_basket`
+				WHERE `adminuser` = '{$this->admin_id}'
+                AND `ordernum` = '{$ordernum}'
+                AND `num` IN ({$target_basket_set})
+                AND `issue_status` = 'REPAY7'
+SQL;
+			$res = query($sql, $this->localdb, true);
+			$rescnt = mysql_affected_rows();
+
+			if($res && $rescnt > 0){
+				while($row=mysql_fetch_assoc($res)){
+					$basket[$row['num']] = 'S11';
+				}
+			}
+		}
+		
+        //oo_basket 롤백
+		 $sql = <<<SQL
+		UPDATE `oo_basket`
+		   SET `issue_status` = '{$return_issue_status}'
+		 WHERE `adminuser` = '{$this->admin_id}'
+		   AND `ordernum` = '{$ordernum}'
+           AND `num` IN ({$target_basket_set})
+		   AND `issue_status` = 'REPAY7'
+SQL;
+
+		$res = query($sql, $this->localdb, true);
+		$rescnt = mysql_affected_rows();
+
+		if ($res === false || $rescnt == 0) {
+            return false;
+		}
+
+		//oo_order 롤백
+		 $sql = <<<SQL
+		UPDATE `oo_order`
+		   SET `repay_date` = ''
+				, `repay_price` = {$repay_price}
+		 WHERE `adminuser` = '{$this->admin_id}'
+		   AND `ordernum` = '{$ordernum}'
+		   AND `paymethod` IN ('B','M')
+		   AND `pay_status` = 'Y'
+		   AND `repay_date` > 0
+SQL;
+		$res = query($sql, $this->localdb, true);
+		$rescnt = mysql_affected_rows();
+
+		if ($res === false || $rescnt == 0) {
+            return false;
+        }
+
+        if($repay_memo == 'ADDPRODUCT') {
+            //상품추가 테이블 미결제로 상태변경
+            $sql = <<<SQL
+                UPDATE `oo_add_product`
+                   SET `add_prd_date` = NOW()
+                     , `pay_status`   = 'S'
+                 WHERE `adminuser`    = '{$this->admin_id}'
+                   AND `ordernum`     = '{$ordernum}'
+                   AND `add_prd_uid`  = '{$add_prd_uid}'
+SQL;
+			$res = query($sql, $this->localdb, true);
+			$rescnt = mysql_affected_rows();
+        } else {
+			//큐제거
+			$sql = <<<SQL
+			UPDATE `oo_refund`
+			   SET `status_date` = NOW()
+				 , `refund_status` = 'STANDBY'
+			 WHERE `adminuser` = '{$this->admin_id}'
+               AND `refund_uid` = '{$refund_uid}'
+			   AND `ordernum` = '{$ordernum}'
+			   AND `refund_type` = 'REPAY'
+			   AND `refund_status` = 'COMPLETE'
+SQL;
+			$res = query($sql, $this->localdb, true);
+			$rescnt = mysql_affected_rows();
+        }
+
+		if ($res === false || $rescnt == 0) {
+            return false;
+        }
+        
+        $usedmenu = $this->usedmenu;
+        if($usedmenu['product_standby']=='N'){
+            //S11 상태 처리
+            $statusHandle = new basketStatus($this->admin_id, $ordernum);
+            $statusHandle->set_status($basket, null, '입금취소로인한 처리');
+        }
+    
+        $this->logHandle->set_pay_log('REPAY_CANCEL', $repay_price, $refund_method, $ordernum);
+        return true;
+	}
+	//재결제완료 롤백 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+	//미입금처리 가능여부체크 //////////////////////////////////////////////////////////////////////////////////////////////////////////
+	function chk_banknopay($ordernum){
+
+		//미입금처리인지 재결제완료 롤백인지 판단
+		$sql =<<<SQL
+			SELECT
+				`repay_date`
+                , `repay_price`
+			FROM
+				`oo_order`
+			WHERE
+				`adminuser` = '{$this->admin_id}'
+				AND `ordernum` = '{$ordernum}'
+SQL;
+		$res = query($sql, $this->localdb, true);
+		$row=mysql_fetch_assoc($res);
+        $repay_price = $row['repay_price'];
+		$repay_date = $row['repay_date'];
+		mysql_free_result($res);
+
+		//재결제 롤백 가능한지 판단
+		$sql =<<<SQL
+			SELECT
+				count(*) as cnt
+			FROM
+				`oo_refund`
+			WHERE
+				`adminuser` = '{$this->admin_id}'
+				AND `ordernum` = '{$ordernum}'
+				AND `refund_status` != 'COMPLETE'
+SQL;
+		$res = query($sql, $this->localdb, true);
+		$row=mysql_fetch_assoc($res);
+			$queue_cnt = $row['cnt'];
+		mysql_free_result($res);
+
+		//다른 유효큐가 있단 말은 재결제 완료하고 추가 CS 진행된것으로 재결제 완료 롤백 불가
+		if($queue_cnt>0){
+			return false;
+		}
+
+		//재결제 롤백
+		if($repay_date>0){
+			return 'repay';
+		}
+
+        // 재결제 금액은 있는데 재결제 입금일 없으면 재결제 대기로 봄
+        if($repay_price > 0 && $repay_date == '0000-00-00 00:00:00') {
+            return false;
+        }
+
+		$sql =<<<SQL
+			SELECT
+                `num`
+                , 'brandcode'
+				, `basket_status`
+			FROM
+				`oo_basket`
+			WHERE
+				`adminuser` = '{$this->admin_id}'
+				AND `ordernum` = '{$ordernum}'
+SQL;
+		$res = query($sql, $this->localdb, true);
+
+        // 0원상품 추가 시 롤백 불가
+        // 0원상품 : 원래 가격 0원, 할인으로 0원, 통옵에서 개별옵션만 선택해서 0원
+        $chkPrice = 0;
+		while($row=mysql_fetch_assoc($res)){
+			if(!in_array($row['basket_status'], array('S11'))){
+				$chknum++;
+			}
+
+            $calculatedPrice = $this->get_calculated_price($row['num']);
+            if($calculatedPrice === 0  && strpos('GIFT', $row['brandcode']) < 0) {
+                $chkPrice++;
+            }
+		}
+		mysql_free_result($res);
+
+		if($chknum==0 && $chkPrice == 0){
+			return 'pay';
+		}else{
+			return false;
+		}
+
+        // 통옵 기본옵션 선택 안함 롤백 불가 
+
+	}
+	//미입금처리 가능여부체크 //////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+	//재결제완료 repay_price 리턴 ///////////////////////////////////////////////////////////////////////////////////////////////////////
+	function get_repay_price($ordernum=null){
+
+		if(!$ordernum) $ordernum = $this->ordernum;
+
+		$sql =<<<SQL
+			SELECT
+				`in_pay_price`
+			FROM
+				`oo_pay_log`
+			WHERE
+				`adminuser` = '{$this->admin_id}'
+				AND `ordernum` = '{$ordernum}'
+				AND `pay_type` = 'REPAY'
+			ORDER BY pay_log_uid DESC
+			LIMIT 1
+SQL;
+		$res = query($sql, $this->localdb, true);
+		$row=mysql_fetch_assoc($res);
+			$repay_price = $row['in_pay_price'];
+		mysql_free_result($res);
+
+		return $repay_price;
+	}
+
+	//재결제완료 repay_price 리턴 ///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	//최근 결제정보 리턴 ///////////////////////////////////////////////////////////////////////////////////////////////////////
+	function get_last_pay_log($ordernum = null, $pay_type = null){
+
+		if(!$ordernum) $ordernum = $this->ordernum;
+
+        $add_where = "";
+        if(!$pay_type) {
+            $add_where = "AND `pay_type` = '{$pay_type}'";
+        }
+
+		$sql =<<<SQL
+			SELECT
+				*
+			FROM
+				`oo_pay_log`
+			WHERE
+				`adminuser` = '{$this->admin_id}'
+				AND `ordernum` = '{$ordernum}'
+                {$add_where}
+			ORDER BY pay_log_uid DESC
+			LIMIT 1
+SQL;
+		$res = query($sql, $this->localdb, true);
+
+        if(!$res) {
+            return false;
+        }
+
+		$row = mysql_fetch_assoc($res);
+		mysql_free_result($res);
+
+		return $row;
+	}
+	//최근 결제정보 리턴 ///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+	//에러출력/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	function alert_error($str){
+		$str = str_replace("'","\'",$str);
+		echo "<script>alert('{$str}');</script>";
+	}
+	//에러출력/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+	//환불/재결제 이슈금액 관리 ////////////////////////////////////////////////////////////////////////////////////////////////////////
+	function set_issue_price(){
+
+
+	}
+	//환불/재결제 이슈금액 관리 ////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+    /**
+     * 해당 주문서의 입금 여부 확인
+     *   - 재결제 유무 확인 할경우
+     *   - 아직 필요가 없어 보입니다. 사용시 유승진에게 문의를
+     * static method
+     * @param <type> $pay_status
+     * @param <type> $repay_price
+     * @return <type>
+     */
+    function check_payed($pay_status, $repay_price) {
+        if ($pay_status == "Y" and $repay_price == 0) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    function check_payed2($oodata_order) {
+        return OrderPrice::check_payed($oodata_order['pay_status'], $oodata_order['repay_price']);
+    }
+
+    /*
+     * @brief	주문서 입금확인 판단 (적립금, 예치금으로)
+     * @param	$paymethod = R : 적립금으로만 결제, E : 예치금으로만 결제, J : 적립금+예치금으로만 결제
+     * @return	boolean의 성공여부, true이면 성공
+     * @author	dasombang@koreacenter.com
+     * @date	2010-08-10
+     */
+	function reset_pay_status($paymethod) {
+        $sql = <<<SQL
+        UPDATE `oo_order`
+           SET `paymethod`  = '{$paymethod}'
+         WHERE `adminuser`  = '{$this->admin_id}'
+           AND `ordernum`   = '{$this->ordernum}'
+           AND `pay_status` = 'N'
+SQL;
+        $res = query($sql, $this->localdb, true);
+
+        $this->act_etc_pay($this->admin_id, $this->ordernum, $paymethod);
+
+        if ($res === false) {
+            return false;
+        }else{
+			return true;
+		}
+	}
+	//주문서 입금확인 판단 (적립금, 예치금으로)//////////////////////////////////////////////////////////////////////////////////////////
+
+
+    /*
+     * @brief	cal_price 계산
+     * @param	$admin_id, $ordernum(주문번호)
+     * @return	boolean의 성공여부, true이면 성공
+     * @author	dasombang@koreacenter.com
+     * @date	2010.06.30
+     * @todo
+     * 주문된 상품의 전체 가격을 계산한다((개별상품가격 + 옵션가격) * 수량 )+ PP옵션가격) (배송비 제외)
+     * basket_status = S or D 상태 상품의 합계
+     * cal_price = 총주문서금액(쿠폰, 할인, VAT 포함 : oo_extension.ext_price 합 (ext_status = 'Y' 인 상태)) - 배송비(oo_order.deli_price)
+     * 총주문서금액 = cal_price + 배송비
+     */
+    function calculate_cal_price() {
+        $sql = <<<SQL
+            SELECT SUM(`sell_price`) AS basket_cal_price
+              FROM `oo_basket`
+             WHERE `adminuser` = '{$this->admin_id}'
+               AND `ordernum`  = '{$this->ordernum}'
+               AND `basket_status` REGEXP '^[SD]{1}'
+SQL;
+        $res = query($sql, $this->localdb, true);
+        if (mysql_num_rows($res) == 0) {
+            $this->localdb = get_db_connection('premium');
+
+            $sql = <<<SQL
+                SELECT SUM(`sell_price`) AS basket_cal_price
+                  FROM `oo_basket`
+                 WHERE `adminuser` = '{$this->admin_id}'
+                   AND `ordernum`  = '{$this->ordernum}'
+                   AND `basket_status` REGEXP '^[SD]{1}'
+SQL;
+            $res = query($sql, $this->localdb, true);
+        }
+        $row = mysql_fetch_object($res);
+        $basket_cal_price = $row->basket_cal_price;
+        @mysql_free_result($res);
+
+        $sql = <<<SQL
+            SELECT SUM(`ext_price`) AS extention_cal_price
+              FROM `oo_extension`
+             WHERE `adminuser` = '{$this->admin_id}'
+               AND `ordernum`  = '{$this->ordernum}'
+               AND `basket_num` = 0
+               AND `ext_status` = 'Y'
+SQL;
+        $res = query($sql, $this->localdb, true);
+        $row = mysql_fetch_object($res);
+        $extention_cal_price = $row->extention_cal_price;
+
+        $cal_price = $basket_cal_price + $extention_cal_price;
+
+        $sql = <<<SQL
+            UPDATE `oo_order`
+               SET `cal_price`	= '{$cal_price}'
+             WHERE `adminuser` 	= '{$this->admin_id}'
+               AND `ordernum`  	= '{$this->ordernum}'
+SQL;
+        $return = query($sql, $this->localdb, true);
+
+        @mysql_free_result($res);
+        return $return;
+    }
+
+    /*
+     * @brief	sell_price 계산
+     * @param	$admin_id, $ordernum(주문번호)
+     * @return	boolean의 성공여부, true이면 성공
+     * @author	inna@koreacenter.com
+     * @date	2010.07.09
+     * @see
+     * @exception
+     * @throw
+     * @version	0.1
+     * @warning
+     * @bug
+     * @todo
+     * 주문된 해당 상품의 전체 가격을 계산한다((개별상품가격 + 옵션가격) * 수량 )+ PP옵션가격) + 할인 가격
+     * oo_extention에서는 basket_num 해당 가격만 가져다가 계산한다.
+     */
+    function calculate_sell_price($basket_num){
+        $sql = <<<SQL
+            SELECT ((`product_price` + `option_price`) * `basket_stock` + `plus_price`) AS basket_sell_price
+              FROM `oo_basket`
+             WHERE `adminuser`  = '{$this->admin_id}'
+               AND `ordernum`   = '{$this->ordernum}'
+               AND `num`        = '{$basket_num}'
+SQL;
+        $res = query($sql, $this->localdb, true);
+
+        if (mysql_num_rows($res) == 0) {
+            $this->localdb = get_db_connection('premium');
+            $sql = <<<SQL
+                SELECT ((`product_price` + `option_price`) * `basket_stock` + `plus_price`) AS basket_sell_price
+                  FROM `oo_basket`
+                 WHERE `adminuser`  = '{$this->admin_id}'
+                   AND `ordernum`   = '{$this->ordernum}'
+                   AND `num`        = '{$basket_num}'
+SQL;
+            $res = query($sql, $this->localdb, true);
+        }
+        $row = mysql_fetch_object($res);
+        $basket_sell_price = $row->basket_sell_price;
+
+        $sql = <<<SQL
+            SELECT sum(ext_price) AS extention_sell_price
+              FROM `oo_extension`
+             WHERE `adminuser`  = '{$this->admin_id}'
+               AND `ordernum`   = '{$this->ordernum}'
+               AND `basket_num` = '{$basket_num}'
+               AND `ext_status` = 'Y'
+SQL;
+        $res = query($sql, $this->localdb, true);
+        $row = mysql_fetch_object($res);
+        $extention_sell_price = $row->extention_sell_price;
+
+        $sell_price = $basket_sell_price + $extention_sell_price;
+
+        $sql = <<<SQL
+            UPDATE `oo_basket`
+               SET `sell_price`	= '{$sell_price}'
+             WHERE `adminuser` 	= '{$this->admin_id}'
+               AND `ordernum`  	= '{$this->ordernum}'
+               AND `num`  	    = '{$basket_num}'
+SQL;
+        $return = query($sql, $this->localdb, true);
+
+        return $return;
+    }
+
+    function reset_basket_issue_status($basket_num) {
+		 $sql = <<<SQL
+            UPDATE `oo_basket`
+               SET `issue_status`   = ''
+             WHERE `adminuser`      = '{$this->admin_id}'
+               AND `ordernum`       = '{$this->ordernum}'
+               AND `sell_price`     = 0
+               AND `issue_status`   = 'REPAYA'
+SQL;
+		$res = query($sql, $this->localdb, true);
+
+        if ($res === false) {
+            return false;
+        }else{
+			return true;
+		}
+    }
+
+    function get_paymethod(){
+        $sql = <<<SQL
+            SELECT `paymethod`
+              FROM `oo_order`
+             WHERE `adminuser`  = '{$this->admin_id}'
+               AND `ordernum`   = '{$this->ordernum}'
+SQL;
+        $res = query($sql, $this->localdb, true);
+        $row = mysql_fetch_object($res);
+        return $row->paymethod;
+    }
+
+
+	// 네이버 체크아웃 4.0 입금확인 관련 SMS 메일을 보내지 않는다. 
+    // 네이버는 데이터를 상품 하나하나 건으로 보내기때문에 정확하게 주문데이터가 다 왔다는 시점을 찾을수 가 없다.
+    //2012.03.19 inna
+    function NHN_act_etc_pay($admin_id, $ordernum, $paymethod, $mail=false, $sms=false, $cashbill=false, $checkout='') {
+
+
+		if(!$this->localdb) $this->localdb = get_db_connection('premium');
+		if(!$this->logHandle) $this->logHandle = new logLib($admin_id, $ordernum);
+
+        $sql = <<<SQL
+        UPDATE `oo_order`
+           SET `pay_date` = NOW()
+             , `pay_status` = 'Y'
+         WHERE `adminuser` = '{$admin_id}'
+           AND `ordernum` = '{$ordernum}'
+		   AND `paymethod` = '{$paymethod}'
+		   AND `order_status` != 'C'
+           AND `pay_status` IN ('N', 'C')
+SQL;
+        $res = query($sql, $this->localdb, true);
+		$rescnt = mysql_affected_rows();
+
+        $usedmenu = get_ordermenu_style($admin_id);
+
+        $statusHandle = new basketStatus($admin_id, $ordernum);
+        if($usedmenu['product_standby']=='N'){
+            //D11 상태 처리
+            $statusHandle->set_status_by_ordernum('D11', null, '입금으로인한 배송준비 처리','S11');
+        }
+        if ($checkout == 'talkcheck') {
+            $this->logHandle->set_pay_log('PAY', $price, $paymethod, $ordernum, 'talkcheck', NULL, NULL);
+        } else {
+            $version = $statusHandle->get_order_checkout_version();
+            $this->logHandle->set_pay_log('PAY', $price, $paymethod, $ordernum, 'checkout', NULL, NULL, $version);
+        }
+
+        return true;
+    }
+
+    //주문서 상품 추가 금액 가져오기
+    function get_basket_repayprice($add_basket_nums = NULL) {
+		
+        if(!$this->localdb) $this->localdb = get_db_connection('premium');
+
+        if ($add_basket_nums) {
+            $add_sql = " AND `num` IN ({$add_basket_nums})";
+        }
+
+        //상품추가 상태인 상품의 금액을 가져옴
+        $sql = <<<SQL
+            SELECT SUM(`sell_price`) AS `add_pay_price`
+              FROM `oo_basket`
+             WHERE `adminuser`    = '{$this->admin_id}'
+               AND `ordernum`     = '{$this->ordernum}'
+               AND `issue_status` = 'REPAYA'
+               {$add_sql}
+SQL;
+        $res = query($sql, $this->localdb, true);
+        $row = mysql_fetch_assoc($res);
+        $add_repay_price = 0;
+        if ($row['add_pay_price'] > 0) {
+            $add_repay_price = $row['add_pay_price'];
+        }
+
+        return $add_repay_price;
+    }
+
+    //주문서 상품 추가 재결제 금액으로 수정
+    function set_add_repay_price ($add_basket_nums) {
+
+		if(!$this->localdb) $this->localdb = get_db_connection('premium');
+		if(!$this->logHandle) $this->logHandle = new logLib($admin_id, $ordernum);
+
+        $add_repay_price    = $this->get_basket_repayprice($add_basket_nums);
+        $order_repay_price  = $this->get_order_repayprice(); 
+        $repay_price        = $order_repay_price + $add_repay_price;
+
+        $sql = <<<SQL
+            UPDATE `oo_order`
+               SET `repay_price` = '{$repay_price}'
+             WHERE `adminuser`   = '{$this->admin_id}'
+               AND `ordernum`    = '{$this->ordernum}'
+SQL;
+        $res = query($sql, $this->localdb, true);
+        //$this->logHandle->set_pay_log('REPAY', $add_repay_price, "B", $this->ordernum,  NULL, "hand"); //상품추가재결제 무통장만 가능
+
+        return true;
+    }
+
+	// 주문서 상품 추가 재결제 완료
+    function act_add_bankrepay($price, $other_ordernum=null, $hand=NULL) {
+
+		//다중처리시 주문번호 변경
+		$old_ordernum = $this->ordernum;
+		if($other_ordernum) $this->ordernum = $other_ordernum;
+
+		//금액 트랜젝션 체크
+        $issue_price = $this->get_add_repayprice($this->ordernum); //oo_add_product 에서 상품추가재결제 금액 가져옴
+
+		if($issue_price != $price){
+			$this->ordernum = $old_ordernum;
+			 return array(false,'금액오류 - 재결제 금액이 변경되었습니다. 확인후 다시 입금확인 하시기 바랍니다.');
+		}
+
+        $order_repay_price = $this->get_order_repayprice(); //기존 주문에 있던 재결제금액
+        $repay_price       = 0;
+        if ($order_repay_price > 0 && $order_repay_price > $issue_price) {
+            //교환 재결제 금액이 있을 수 있으니까 체크!!
+            $repay_price = $order_repay_price - $issue_price;
+        }
+
+        $sql = <<<SQL
+        UPDATE `oo_order`
+           SET `repay_date`  = NOW()
+             , `repay_price` = '{$repay_price}' 
+         WHERE `adminuser`   = '{$this->admin_id}'
+           AND `ordernum`    = '{$this->ordernum}'
+SQL;
+        $res = query($sql, $this->localdb, true);
+        if ($res === false) {
+			$this->ordernum = $old_ordernum;
+            return array(false,'DB오류');
+        }
+
+		//대상상품 상태 처리용
+		$usedmenu = $this->usedmenu;
+		if($usedmenu['product_standby']=='N'){
+			$sql = <<<SQL
+				SELECT `num`, `basket_status`
+				  FROM `oo_basket`
+				 WHERE `adminuser`    = '{$this->admin_id}'
+		           AND `ordernum`     = '{$this->ordernum}'
+		           AND `issue_status` = 'REPAYA'
+SQL;
+			$res = query($sql, $this->localdb, true);
+			if($res){
+				while($row=mysql_fetch_assoc($res)){
+					$basket[$row['num']] = 'D11';
+				}
+			}
+		}
+
+		// 스크래치 관리
+		 $sql = <<<SQL
+            UPDATE `oo_basket`
+               SET `issue_status` = 'REPAY7'
+             WHERE `adminuser` = '{$this->admin_id}'
+               AND `ordernum` = '{$this->ordernum}'
+               AND `issue_status` = 'REPAYA'
+SQL;
+		   //AND `issue_status` IN ('REPAY1','REFUNDC')
+		$res = query($sql, $this->localdb, true);
+		$rescnt = mysql_affected_rows();
+
+		if ($res === false || $rescnt == 0) {
+			$this->ordernum = $old_ordernum;
+			return array(false,'DB오류');
+		}
+
+        $sql = <<<SQL
+            UPDATE `oo_add_product`
+               SET `pay_status` = 'C'
+             WHERE `adminuser`  = '{$this->admin_id}'
+               AND `ordernum`   = '{$this->ordernum}'
+               AND `pay_status` = 'S'
+SQL;
+        $res = query($sql, $this->localdb, true); 
+		if ($res === false || $rescnt == 0) {
+			$this->ordernum = $old_ordernum;
+			return array(false,'DB오류');
+		}
+
+        $usedmenu = $this->usedmenu;
+        if($usedmenu['product_standby']=='N'){
+            //D11 상태 처리
+            $statusHandle = new basketStatus($this->admin_id, $this->ordernum);
+            $statusHandle->set_status($basket, null, '입금으로인한 배송준비 처리');
+        }
+
+        $pay_memo = 'ADDPRODUCT';
+        $this->logHandle->set_pay_log('REPAY', $price, "B", $this->ordernum, NULL, $hand, $pay_memo);
+        $this->ordernum = $old_ordernum;
+        return array(true,1);
+
+    }
+
+    function get_order_repayprice () {
+
+        $sql = <<<SQL
+            SELECT `repay_price`
+              FROM `oo_order`
+             WHERE `adminuser`   = '{$this->admin_id}'
+               AND `ordernum`    = '{$this->ordernum}'
+SQL;
+        $res   = query($sql, $this->localdb, true);
+        $row   = mysql_fetch_object($res);
+        $repay_price = $row->repay_price;
+    
+        return $repay_price;    
+    }
+
+    function get_add_repayprice ($other_ordernum) {
+
+		//다중처리시 주문번호 변경
+		$old_ordernum = $this->ordernum;
+		if($other_ordernum) $this->ordernum = $other_ordernum;
+
+		$sql =<<<SQL
+			SELECT SUM(`issue_price`) AS `issue_price`
+			  FROM `oo_add_product`
+			 WHERE `adminuser`  = '{$this->admin_id}'
+			   AND `ordernum`   = '{$this->ordernum}'
+               AND `pay_status` = 'S'
+SQL;
+		$res = query($sql, $this->localdb, true);
+        $issue_price = 0;
+        if ($res != false) {
+		    $row = mysql_fetch_assoc($res);
+            if ($row && $row['issue_price'] != NULL) {
+		        $issue_price = $row['issue_price'];
+            }
+        }
+
+        return $issue_price;
+
+    }
+    /*
+     *
+     *
+     *
+     */
+    function set_safe_phone() {
+        $safe_number_use = get_safe_number_config($this->admin_id);
+        $order_info = get_order_info($this->admin_id, $this->ordernum);
+        $get_deli = new basketStatus($this->admin_id, $this->ordernum);
+        $get_basket_num = "1";
+        $delivery_num = $get_deli->get_delivery_num($get_basket_num);
+        $oo_delivery = new OODelivery($this->admin_id);
+        $delivery_info = $oo_delivery->get_info_by_deliverynum($delivery_num);
+        $number_arr = array("{$delivery_info['receiver_mobile']}","{$delivery_info['receiver_phone']}");
+
+        $etctype_arr = etctype_parser($order_info['etctype']);
+
+        if ($safe_number_use->snc_use == "Y" && $etctype_arr['SAFENUMBER'] == 'Y' && strlen($etctype_arr['SPN']) < 1) {
+
+            $safe_tel = receive_safe_number($this->admin_id, $this->ordernum, $safe_number_use->snc_expire_date, $number_arr);
+            if (strlen($safe_tel) > 0) {
+                $up_etc_safe = "SPN={$safe_tel}|";
+                $sql = "update oo_order set `etctype` = CONCAT_WS('', `etctype`, '{$up_etc_safe}') where adminuser='$this->admin_id' and ordernum ='$this->ordernum'";
+                $res = query($sql, $this->localdb);
+                if ($res === false) {
+                    return false;
+                }else{
+                    return true;
+                }
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+    }
+    /*
+     * 모나미 펫 관련 결제 시 기부상품 즉시 처리함
+     * eogmlqwe
+     * 2016-01-04
+     */
+    function get_prd_name($basket_num) {
+        $sql =<<<SQL
+            SELECT `product_name`
+              FROM `oo_basket`
+             WHERE `adminuser` = '{$this->admin_id}'
+               AND `ordernum` = '{$this->ordernum}'
+               AND `num` = '{$basket_num}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row['product_name'];
+    }
+    function get_order_data() {
+        $sql =<<<SQL
+            SELECT `order_status`
+              FROM `oo_order`
+             WHERE `adminuser` = '{$this->admin_id}'
+               AND `ordernum` = '{$this->ordernum}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row;
+    }
+
+    function get_user_id() {
+        $sql =<<<SQL
+            SELECT `id`
+              FROM `oo_order`
+             WHERE `adminuser` = '{$this->admin_id}'
+               AND `ordernum` = '{$this->ordernum}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row['id'];
+    }
+
+    function set_donation_prd() {
+        $admin_id = $this->admin_id;
+        $ordernum = $this->ordernum;
+        $sql =<<<SQL
+            SELECT *
+              FROM `oo_donation_basket`
+             WHERE `adminuser` = '{$admin_id}'
+               AND `ordernum` = '{$ordernum}'
+               AND `odb_donation_type` = 'PRD'
+SQL;
+        $res = query($sql, $this->localdb);
+        while($row = mysql_fetch_object($res)) {
+            $prd_name = $this->get_prd_name($row->basket_num);
+            $sub_id = $this->get_user_id();
+            $content = "[".$prd_name."] 상품을 기부하셨습니다."; 
+            $sql_ins =<<<SQL
+                INSERT INTO `donation`
+                    SET `adminuser` = '{$admin_id}'
+                      , `user_id` = '{$sub_id}'
+                      , `type` = 'BUY'
+                      , `donation` = '{$row->odb_donation}'
+                      , `content` = '{$content}'
+                      , `ordernum` = '{$ordernum}'
+                      , `donation_form` = 'PRD'
+                      , `regdate` = NOW()
+SQL;
+            $ins_res = query($sql_ins, $this->localdb);
+            if ($ins_res) {
+                $sql_up =<<<SQL
+                    UPDATE `oo_donation_basket`
+                       SET `odb_give_status` = 'Y'
+                         , `odb_give_date` = NOW()
+                     WHERE `adminuser` = '{$admin_id}'
+                       AND `ordernum` = '{$ordernum}'
+                       AND `basket_num` = '{$row->basket_num}'
+SQL;
+                query($sql_up, $this->localdb);
+            }
+        }
+    }
+    /*
+     * @brief   선택 상품의 cal_price 가져오기
+     * @param   $arr_basket_num = array(1, 2, 3, ...)
+     * @return  int
+     */
+    function get_calculated_price($arr_basket_num) {
+        if (is_array($arr_basket_num)) {
+            $str_basket_num = implode(',', $arr_basket_num);
+        } else {
+            $str_basket_num = $arr_basket_num;
+        }
+
+        $sql = <<<SQL
+            SELECT sum((`product_price` + `option_price`) * `basket_stock` + `plus_price`) AS basket_sell_price
+              FROM `oo_basket`
+             WHERE `adminuser`  = '{$this->admin_id}'
+               AND `ordernum`   = '{$this->ordernum}'
+               AND `num`      IN ({$str_basket_num})
+SQL;
+        $res = query($sql, $this->localdb, true);
+        $row = mysql_fetch_object($res);
+        $basket_sell_price = $row->basket_sell_price;
+
+        $sql = <<<SQL
+            SELECT sum(ext_price) AS extention_sell_price
+              FROM `oo_extension`
+             WHERE `adminuser`  = '{$this->admin_id}'
+               AND `ordernum`   = '{$this->ordernum}'
+               AND `basket_num` IN ({$str_basket_num})
+SQL;
+        $res = query($sql, $this->localdb, true);
+        $row = mysql_fetch_object($res);
+        $extention_sell_price = $row->extention_sell_price;
+
+        $sell_price = $basket_sell_price + $extention_sell_price;
+        
+        return $sell_price;
+    }
+
+}
+?>
