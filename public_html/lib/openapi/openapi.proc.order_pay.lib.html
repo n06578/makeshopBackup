@@ -1,0 +1,203 @@
+<?php
+require_once $_ENV['PATH_LIB'].'/oo_return.lib.html';
+require_once $_ENV['PATH_LIB'].'/oo_price.lib.html';
+require_once $_ENV['PATH_FUNC'].'/update_plan_hit.func.html';
+
+class openApiPrcoOrderPay extends OpenApiProcOrderStatus {
+    var $adminuser;
+    var $process;
+    var $adminuser_info = array();
+    
+    function openApiPrcoOrderPay($adminuser, $localdb) {
+        $this->__construct($adminuser, $localdb);
+    }
+
+    function __construct($adminuser, $localdb) {
+        $this->adminuser = $adminuser;
+        $this->localdb = $localdb;
+        $this->adminuser_info = $this->adminuser_info();
+        if ($this->adminuser_info['usecoupon'] == 'S') {
+            $this->smartCoupon = new SmartCoupon($this->adminuser);
+        }
+    }
+
+    function commonValidation()
+    {
+        return array(
+            'ordernum' => array('required')
+        );
+    }
+
+    function caseValidation($param)
+    {
+        $validation = array();
+        if ($this->process === 'paid') {
+           $validation = $this->orderPaidValidation($param);
+        }
+        return $validation;
+    }
+
+    function orderPaidValidation($param)
+    {
+        $result = array();
+        $order_info = $this->orders($param['ordernum']);
+        if ($order_info['pay_status'] !== 'N') {
+            return array('미입금 상태가 아닙니다.');
+        }
+        if ($order_info['order_status'] !== 'N') {
+            return array('입금처리가 불가능한 상태입니다.');
+        }
+        if (!in_array($order_info['paymethod'], array('B', 'M', 'S')) || strpos($order_info['bank_account'],'[가상]') === true) {
+            return array('무통장 입금만 가능합니다.');
+        }
+        return $result;
+    }
+
+    function handleProcess($param)
+    {
+        $result = array();
+        switch($this->process) {
+            case 'paid' :
+                $result = $this->handlePaid($param);
+            break;
+        }
+        return $result;
+    }
+
+    function handlePaid($param)
+    {
+        global $sub_id;
+        $sub_id = 'mk_open_api';
+        $result = array();
+        $orderPrice = new OrderPrice($this->adminuser, $param['ordernum']);
+        $hand_type = $param['deposit_status'] == 'A' ? 'auto' : 'hand';
+        if ($orderPrice->act_bankpay(0, $param['ordernum'], $hand_type)) {
+            $result = $this->orderPaidAferProcess($param['ordernum']);
+        }
+        return $result;
+    }
+
+    function orderPaidAferProcess($ordernum)
+    {
+        $stock_return = array();
+        $order_info  = OrderData::get_order_data($this->adminuser, $ordernum, $this->localdb);
+        $basket_info = OrderData::get_basket_datas($this->adminuser, $ordernum, $this->localdb);
+        // 로그
+        if (is_array($basket_info)) $this->orderPaidLog($ordernum, $basket_info);
+        // 재고 감소 처리!! (결제당시 결제완료 처리시 재고 처리
+        if (strchr($order_info['etctype'], 'PAYMENTSTOCK=PAY') !== false && is_array($basket_info)) $stock_return = $this->orderPaidStockProcess($ordernum, $basket_info);
+        $save_log_text = count($stock_return[1]) > 0 ?  "상품 수량 차감 완료([".implode('],[', $stock_return[1])."])" : "상품 수량 차감 없음";
+
+        updatelogs($ordernum, '[관리자(OPENAPI) 입금완료] : '.$save_log_text);
+        
+        // 쿠폰 지급
+        if (strlen($order_info['id']) > 0) {
+            if ($this->adminuser_info['usecoupon'] == 'S') {
+                $this->orderPaidSmartCouponProcess($order_info);
+            } else if (!in_array($this->adminuser_info['usecoupon'], array('N', 'S'))) {
+                $this->orderPaidCouponProcess($order_info);
+            }
+        }
+
+		return array(
+			'save_log_text' =>$save_log_text."??",
+			'if'=>strchr($order_info['etctype'], 'PAYMENTSTOCK=PAY'),
+			'etctype'=>$order_info['etctype'],
+			'order_info'=>$order_info,
+			'stock_return' =>$stock_return
+		);
+    }
+
+    function orderPaidSmartCouponProcess($order_info)
+    {
+        $this->smartCoupon->first_order_coupon($order_info['id'], $order_info['pay_path']);
+        //상품 구매시 쿠폰
+        $coupon_param = array('basket_nums' => $this->orderAddProduct($order_info['ordernum']));
+        $this->smartCoupon->set_product_buy_coupon($order_info['id'],  $order_info['ordernum'], 'ORDER', $coupon_param);
+        $this->smartCoupon->set_buy_price_coupon($order_info['id'], $order_info['ordernum'], 'ORDER', $coupon_param);
+    }
+
+    function orderAddProduct($ordernum)
+    {
+        $result = array();
+        $sql = <<<SQL
+                    SELECT `basket_set`
+                      FROM `oo_add_product`
+                     WHERE `adminuser`  = '{$this->adminuser}'
+                       AND `ordernum`   = '{$ordernum}'
+                       AND `pay_status` = 'S'
+                     ORDER BY `add_prd_date` DESC LIMIT 1 
+SQL;
+        $res   = query($sql, $this->localdb);
+        $row   = mysql_fetch_assoc($res);
+        $basket_nums = $row['basket_set'];
+        if (strlen($basket_nums) > 0) {
+            $result = explode(',', $basket_nums);
+        }  
+        return $result;
+    }
+
+    function orderPaidCouponProcess($order_info)
+    {
+        require_once $_ENV['PATH_LIB']."/coupon.lib.html";
+        $orderCoupon = new OrderCoupon($this->adminuser, $order_info['id']);
+        $orderCoupon->user_first_order_coupon("oo");
+    }
+
+    function orderPaidLog($ordernum, $basket)
+    {
+        $basket_num_arr = Array();
+        foreach ($basket as $num => $value) {
+            //결제 대기만 넘김 또는 스마트픽업 배송중
+            if(in_array($value['basket_status'], array('D11', 'S11')) || ($value['basket_status'] == 'D15' && ($value['old_status'] == 'S11' || $value['old_status'] == 'D11') && $value['smartpickup_store_uid'] > 0)) { 
+                $basket_num_arr[] = $num;
+            }
+        }
+        if (count($basket_num_arr) > 0) {
+            $str_arr_basket_num = implode(',', $basket_num_arr);
+            $message = "주문번호 : {$ordernum} / num : {$str_arr_basket_num} / 동작일 : ".date("YmdHis")." / 관리자 입금완료(OPENAPI}";
+            savelogs($message);
+        }
+    }
+
+    function orderPaidStockProcess($ordernum, $basket)
+    {
+        global $localdb;
+        $localdb = $this->localdb;
+        $result = array();
+        $arr_basket_num = array();
+        foreach ($basket as $num => $value) {
+            $add_field = '';
+            if($value['basket_status']  =="S11" || $value['basket_status']  =="D11" ) {
+                $arr_basket_num[] = $num;
+            }
+            // 상품 주문수 + 해줌
+            if (AdminuserSpecial::is_prd_total_sellcount($this->adminuser)) {
+                $add_field = ", `p`.`total_sellcount` = `p`.`total_sellcount` + {$value['basket_stock']}";
+            }
+            $sql = <<<SQL
+                    UPDATE `product` as `p`
+                    SET `p`.`sellcount` = `p`.`sellcount` + {$value['basket_stock']},
+                        `p`.`selldate` = NOW()
+                        {$add_field}
+                    WHERE `p`.`adminuser` = '{$this->adminuser}' AND `p`.`uid` = '{$value['product_uid']}'
+SQL;
+            query($sql, $this->localdb);
+            // 기획전 상품 주문수 증가
+            // 진행중인 기획전에 포함된 상품 주문시 기획전 주문수 증가
+            update_plan_hit($this->adminuser, $value['product_uid'], 1, $value['basket_stock']);
+        }
+        $result =  OOStock::set_stock($this->adminuser, $ordernum, $arr_basket_num, '-');
+        return $result;
+    }
+
+    function defineResult($validation, $param)
+    {
+        return array(
+            'return'   => count($validation) > 0 ? false : true,
+            'message'   => count($validation) > 0 ? $validation : '',
+            'ordernum' => $param['ordernum']
+        );
+    }
+
+}
