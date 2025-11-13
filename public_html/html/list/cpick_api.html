@@ -1,0 +1,141 @@
+<?php
+require_once realpath($_SERVER['DOCUMENT_ROOT']."/../conf"). "/local.env.html";
+
+require_once $_ENV['PATH_LIB']."/openapi/openapi.validation.lib.html";
+require_once $_ENV['PATH_LIB']."/oo_create.lib.html";
+require_once $_ENV['PATH_FUNC']."/manager_admin.func.html";
+require_once $_ENV['PATH_LIB'].'/smart_reserve.lib.html';
+
+
+mysql_connect ("","makeshop","merong03");
+mysql_select_db ("makeshop");
+$i=0;
+$adminUser = "n06578";
+$where = "where adminuser = 'n06578'";
+$sql = "show tables";
+$sql = "select * from adminuser where id= '{$adminUser}'"; // 개인정보
+//$sql = "SELECT jiro FROM `adminuser` WHERE `id` = '{$adminUser}'";  // 결제은행
+//$sql = "SELECT * FROM `open_api_auth` WHERE `adminuser` = '{$adminUser}'"; // openapi 연결 정보
+//$sql = "select * from `oo_basket` where adminuser='{$adminUser}'";
+//$sql = "SELECT *
+//              FROM `open_api_auth`
+//             WHERE `adminuser` = 'n06578'
+//                   AND `shop_key` = 'eec0dcabca527874b1777768ba9a68b4'";
+//$sql = "select * from product where adminuser ='{$adminUser}'";
+//$sql = "select * from oo_pay_log {$where} and ordernum ='20251112091803-10121736441'"; -> 결제 히스토리
+$sql = "select * from oo_order {$where} and ordernum in ('20251112091803-10121736441','20251112091144-36981665860')";
+$sql = "select * from product_option_stock {$where}";
+$sql = "select * from product_option {$where} and uid='11476247'";
+//$sql = "select * from oo_basket {$where}";
+
+/*
+$sql ="SELECT `b`.`num`, `b`.`basket_stock`, `b`.`product_uid`, `b`.`prd_option_uid`, `b`.`stock_chk`, `p`.`option_type`, `b`.`etctype`
+                  , `b`.`smartpickup_store_uid`, `b`.`option_type` as basket_option_type
+              FROM `oo_basket` as `b`
+         LEFT JOIN `product` as `p`
+                ON `p`.`adminuser` = `b`.`adminuser`
+               AND `p`.`uid` = `b`.`product_uid`
+             WHERE `b`.`adminuser` = 'n06578'
+               AND `b`.`ordernum`  = '20251112135704-78608328621'
+               AND `b`.`stock_chk` = 'NOT'
+                    AND `b`.`num` IN (1)";
+// */
+
+//$sql = "select * from oo_basket {$where} and ordernum='20251112155254-95409652658'";
+//
+//$sql = "select * from oo_order {$where} and ordernum in ('20251112170412-46490287724')";
+//$sql = "select * from product {$where} and uid='11476230'";
+//$sql = "select * from oo_pay_log {$where} and ordernum ='20251112153528-24091687637'"; //-> 결제 히스토리
+//$sql = "  UPDATE `oo_temp_order`
+//             SET
+//                `order_date` = '2025-11-12 17:02:22',`order_status` = 'Y',`etctype` = 'PAYMENTSTOCK=PAY',`link_id` = 'cpick',`group_id` = ''
+//           WHERE `adminuser`        = 'n06578'
+//             AND `ordernum`         = '20251112155254-95409652658'";
+
+//$sql = "select * from product_stock {$where} and sto_id in(4,3)";
+$sql = "select * from oo_basket {$where} and ordernum='20251113093526-47235137440'";
+$sql = "select * from oo_order {$where} and ordernum='20251113105139-37451016486'";
+
+
+//=========================================================================================================================
+$res = mysql_query($sql);
+$cnt = mysql_num_rows($res);
+echo$cnt."/";
+echo $sql;
+///*=========================================================================================================================
+while($row = mysql_fetch_assoc($res)){
+	echo "<pre>";
+	varDump($row);
+	echo "</pre>";
+}
+//=========================================================================================================================*/
+/*=========================================================================================================================
+while($row = mysql_fetch_row($res)){
+	$i++;tableData($i,$row);
+}
+tableBottom();
+//=========================================================================================================================*/
+function varDump($row){
+	echo "======================================================================<br>";
+	var_dump($row);
+	echo "</pre>";
+}
+function tableData($i,$row){
+	if($i==1)tableTop();
+	echo "<tr><td>{$i}</td><td>{$row[0]}</td></tr>";
+}
+function tableTop(){
+	echo "<table border='1'><tr><th>num</th><th>테이블</th><th>query</th></tr>";
+}
+function tableBottom(){echo "</table>";}
+
+
+/*
+ SELECT `b`.`num`, `b`.`basket_stock`, `b`.`product_uid`, `b`.`prd_option_uid`, `b`.`stock_chk`, `p`.`option_type`, `b`.`etctype`
+ , `b`.`smartpickup_store_uid`, `b`.`option_type` as basket_option_type
+ FROM `oo_basket` as `b`
+ LEFT JOIN `product` as `p`
+ ON `p`.`adminuser` = `b`.`adminuser`
+ AND `p`.`uid` = `b`.`product_uid`
+ WHERE `b`.`adminuser` = 'n06578'
+ AND `b`.`ordernum`  = '20251112091803-10121736441'
+ AND `b`.`stock_chk` = 'NOT'
+ AND `b`.`num` IN (1)"
+ */
+
+function testDate(){
+	$param['user_id'] ="user_id";
+	$param['order_date'] ="order_date";
+	$param['total_order_price'] ="total_order_price";
+	$param['total_pay_price'] ="total_pay_price";
+	$param['paymethod'] ="paymethod";
+	$param['sender'] ="sender";
+	$param['phone'] ="phone";
+	$param['mobile'] ="mobile";
+	$param['email'] ="email";
+	$param['memo'] ="memo";
+	$param['post'] ="post";
+	$param['address'] ="address";
+	$param['address2'] ="address2";
+	$param['deli_price'] ="deli_price";
+	$param['receiver'] ="receiver";
+	$param['receiver_mobile'] ="receiver_mobile";
+	$param['receiver_phone'] ="receiver_phone";
+	$param['deli_msg'] ="deli_msg";
+	$param['baskets'] ="baskets";
+	$param['baskets'] = array();
+	$param['baskets'][]['product_uid'] = '11476161';
+	$param['baskets'][]['prd_option_uid'] = '';
+	$param['baskets'][]['stock'] = '1';
+	$param['baskets'][]['price'] = '0';
+	$param['baskets'][]['product_name'] = 'API-1';
+	$param['baskets'][]['option_name'] = '';
+
+	return $param;
+}
+?>
+
+
+
+
+

@@ -10,6 +10,7 @@ class OpenApiProcCpickOnlineOrder extends OpenApiProcess
 	var $process;
 	var $license;
 	var $oordercreate;
+	var $priceexists;
 	function OpenApiProcCpickOnlineOrder($adminuser, $license)
 	{
 		$this->__construct($adminuser, $license);
@@ -54,6 +55,10 @@ class OpenApiProcCpickOnlineOrder extends OpenApiProcess
 	function commonValidate()
 	{
 		return true;
+	}
+
+	function depositPossible(){
+		$this->deposit_passible = true;
 	}
 
 	/**
@@ -142,31 +147,10 @@ class OpenApiProcCpickOnlineOrder extends OpenApiProcess
 		return $return;
 	}
 
-	function define_set_order_data($param)
-	{
-		return array(
-			'start_price'       => $param['total_order_price'],
-			'cal_price'         => $param['total_pay_price'] + $param['total_used_reserve'],
-			'order_date'        => $param['order_date'],
-			'order_status'      => 'Y',
-			'link_id'           => $param['link_id'],
-			'group_id'          => $users['group_id'],
-			'used_reserve'      => $param['total_used_reserve'],
-			'used_emoney'       => $param['total_used_emoney'],
-			'ip'                => $_SERVER['REMOTE_ADDR'],
-		);
-	}
-
 	function createOrderCreateObj($ordernum)
 	{
 		$this->oordercreate = new OrderCreate($this->adminuser, $ordernum);
 	}
-
-	function createOrderPayObj()
-	{
-		$this->oorderpay = new openApiPrcoOrderPay($this->adminuser,$this->localdb);
-	}
-
 	/**
 	 * 데이터 처리
 	 * @param array $param
@@ -174,56 +158,21 @@ class OpenApiProcCpickOnlineOrder extends OpenApiProcess
 	 */
 	function store($encode_post)
 	{
+		$this->depositPossible();
 		$param = array_merge($encode_post, $this->create_add_fields($encode_post));
 		$users = $this->define_user($param);
-
-		/*
-		$this->createOrderPayObj();
-		$ordernum = '20251112091144-36981665860'; // 페이지 수동 접수
-		$ordernum = '20251112091803-10121736441'; // 1
-		$ordernum = '20251112102339-39667463005'; // 2
-		$ordernum = '20251112112510-69794587570'; // 3
-		$ordernum = '20251112115246-65236310562 '; // 4
-		$ordernum = '20251112120144-69428774545 '; // 5
-		$ordernum = '20251112135928-66312587244 '; // 6
-
-		$order_info  = OrderData::get_order_data($this->adminuser,$ordernum, $this->localdb);
-		$basket_info = OrderData::get_basket_datas($this->adminuser, $ordernum, $this->localdb);
-        $result =  OOStock::set_stock($this->adminuser, $ordernum, $arr_basket_num, '-');
-
-		$stock_return = $this->oorderpay->orderPaidStockProcess($ordernum, $basket_info);
-		$save_log_text = count($stock_return[1]) > 0 ?  "상품 수량 차감 완료([".implode('],[', $stock_return[1])."])" : "상품 수량 차감 없음";
-		$arr_basket_num[] = $basket_info;
-
-		return array(
-			'order_info' =>$order_info,
-			'basket_info' => $basket_info,
-//			'stock_return' => $stock_return,
-			'save_log_text' =>$save_log_text
-		);
-		//*/
 		$this->create_order_handle($param, $users);
 		updatelogs($param['ordernum'], "### 크픽 주문서 생성 ###");
-		$this->update_order_status($param, $users);
+		if($this->deposit_passible){
+			$this->update_order_price($param);
+			$this->update_stock_count($param);
+		}
 		file_save_log("openapi_cpick_online_order_".date('Ymd'), "create_order  data : ".json_encode($this->encodeUTF8($param))." user : ".json_encode($this->encodeUTF8($users)));
 		$this->update_order_max_barcode($param['barcode']);
 
-		$order_info  = OrderData::get_order_data($this->adminuser,$ordernum, $this->localdb);
-		$order_price = new OrderPrice($this->adminuser, $param['ordernum']);
-		$order_price->act_undobankpay($order_info['cal_price']);
-
-//		$basket_info = OrderData::get_basket_datas($this->adminuser, $param['ordernum'], $this->localdb);
-//		OOStock::set_stock($this->adminuser, $param['ordernum'], $arr_basket_num, '-');
-//		$arr_basket_num[] = $basket_info;
-//		$stock_return = $this->oorderpay->orderPaidStockProcess($param['ordernum'], $basket_info);
-//		$save_log_text = count($stock_return[1]) > 0 ?  "상품 수량 차감 완료([".implode('],[', $stock_return[1])."])" : "상품 수량 차감 없음";
-
 		return array(
 			'result' => true,
-			'ordernum' => $param['ordernum'],
-			'stock_return' => $stock_return,
-			'save_log_text' =>$save_log_text,
-			'result_data' =>$result
+			'ordernum' => $param['ordernum']
 		);
 	}
 
@@ -232,40 +181,6 @@ class OpenApiProcCpickOnlineOrder extends OpenApiProcess
 		$sql = "UPDATE `etc` set `order_max_barcode`='{$barcode}' where adminuser='{$this->adminuser}' limit 1 ";
 		query($sql, $this->localdb);
 	}
-
-	function update_order_status($param, $users)
-	{
-		return true;
-		// oo_log 등록
-		$logHnadle = new logLib($this->adminuser, $param['ordernum']);
-		$baskets = $this->basket_status($param['ordernum']);
-		if (is_array($baskets)) {
-			foreach ($baskets as $basket) {
-				$setLogs = array($basket['num']  => array('S00', 'S01', '크픽 자동 결재완료 처리'));
-				$logHnadle->set_status_log($setLogs, '상태변경');
-			}
-		}
-		if ($users['is_user']) {
-			$this->update_user_order_date($param['user_id'], $param['order_date']);
-		}
-	}
-
-	function basket_status($ordernum) {
-		$result = array();
-		$sql = <<<SQL
-            SELECT `num`, `basket_status`
-              FROM `oo_basket`
-             WHERE `adminuser` = '{$this->adminuser}'
-               AND `ordernum` = '{$ordernum}'
-SQL;
-		if (false !== ($res = query($sql, $this->localdb))) {
-			while ($row = mysql_fetch_assoc($res)) {
-				$result[$row['num']] = $row;
-			}
-		}
-		return $result;
-	}
-
 
 	function create_order_handle($param, $users)
 	{
@@ -290,6 +205,26 @@ SQL;
 		));
 		$this->oordercreate->set_order_data($this->define_set_order_data($param));
 		$this->oordercreate->create_order_data();
+	}
+
+	function create_basket_temp($param)
+	{
+		if (is_array($param['baskets'])) {
+			if($param['total_order_price'] != 0 || $param['total_pay_price'] != 0 || $param['deli_price'] != 0 ) $this->deposit_passible = false;
+			foreach ($param['baskets'] as $index => $basket)
+			{
+				$baskets = array_merge(array(
+					'tempid' => $param['tempid'],
+					'delivery_num' => $param['delivery_num'],
+					'link_id' => $param['link_id'],
+					'stock_chk' => 'NOT',
+					'basket_status' => $param['basket_status'],
+					'smartpickup_store_uid' => $param['store_id']
+				), $this->define_product($basket));
+				$this->oordercreate->insert_temporderbasket($baskets);
+				file_save_log("openapi_cpick_online_order_".date('Ymd'), "create_basket_temp : ".json_encode($this->encodeUTF8($baskets)));
+			}
+		}
 	}
 
 	function create_order_temp($param, $users)
@@ -329,23 +264,59 @@ SQL;
 
 		$this->oordercreate->insert_tempmsg($ordermsg);
 	}
-	function create_basket_temp($param)
-	{
-		if (is_array($param['baskets'])) {
-			foreach ($param['baskets'] as $index => $basket)
-			{
-				$baskets = array_merge(array(
-					'tempid' => $param['tempid'],
-					'delivery_num' => $param['delivery_num'],
-					'link_id' => $param['link_id'],
-					'stock_chk' => 'NOT',
-					'basket_status' => $param['basket_status'],
-					'smartpickup_store_uid' => $param['store_id']
-				), $this->define_product($basket));
-				$this->oordercreate->insert_temporderbasket($baskets);
-				file_save_log("openapi_cpick_online_order_".date('Ymd'), "create_basket_temp : ".json_encode($this->encodeUTF8($baskets)));
+
+	function update_order_price($param){
+		$order_info  = OrderData::get_order_data($this->adminuser,$param['ordernum'], $this->localdb);
+		$order_price = new OrderPrice($this->adminuser, $param['ordernum']);
+		$order_price->act_bankpay($order_info['cal_price'], NULL);
+	}
+
+	function update_stock_count($param){
+		$oodata_baskets = OrderData::get_basket_datas($this->adminuser, $param['ordernum'], $this->localdb);
+		foreach ($oodata_baskets as $k => $value) {
+			if ($value['basket_status'] == "S11" || $value['basket_status'] == "D11") { //결제 대기만 넘김
+				$arr_basket_num[] = $k;
+				$log_arr_basket_num[] = $k;
 			}
+			//로깅
+			if (count($log_arr_basket_num) > 0) {
+				$str_arr_basket_num = implode(',', $log_arr_basket_num);
+				$message = "주문번호 : {$ordernum} / num : {$str_arr_basket_num} / 동작일 : ".date("YmdHis")." / 관리자 입금완료";
+				savelogs($message);
+			}
+
+			// 상품 주문수 증가(+)
+			$sql2 = <<<SQL
+					UPDATE `product` as `p`
+					SET `p`.`sellcount` = `p`.`sellcount` + {$value['basket_stock']},
+						`p`.`selldate` = NOW()
+					 WHERE `p`.`adminuser` = '{$this->adminuser}' AND `p`.`uid` = '{$value['product_uid']}'
+SQL;
+			$result2 = query($sql2, $this->localdb);
 		}
+		// 재고 차감
+		$result_return =  OOStock::set_stock($this->adminuser, $param['ordernum'], $arr_basket_num, '-');
+		if (count($result_return[1]) > 0) {
+			$save_log_text = "상품 수량 차감 완료([".implode('],[', $result_return[1])."])";//재고처리 한 리스트를 만들어 놓는다.
+		} else {
+			$save_log_text = "상품 수량 차감 없음";
+		}
+		$logstr = '관리자 입금완료';
+		updatelogs($param['ordernum'], '['.$logstr.'] : '.$save_log_text);
+	}
+
+	function define_set_order_data($param)
+	{
+		return array(
+			'start_price'       => $param['total_order_price'],
+			'cal_price'         => $param['total_pay_price'],
+			'deli_price'		=>$param['deli_price'],
+			'order_date'        => $param['order_date'],
+			'order_status'      => 'Y',
+			'etctype'			=> 'PAYMENTSTOCK=PAY',
+			'link_id'           => $param['link_id'],
+			'group_id'          => $users['group_id'],
+		);
 	}
 
 	function define_product($basket)
@@ -354,6 +325,7 @@ SQL;
 		$productObj->set_uid($basket['product_uid']);
 		$products = (array) $productObj->get();
 		$options = $this->define_product_option($basket['product_uid'], $basket['prd_option_uid']);
+		if($basket['price'] != 0) $this->deposit_passible = false;
 		return array(
 			'product_uid'       => ($products['uid'])?$products['uid']:"999999",
 			'prd_option_uid'    => $basket['prd_option_uid'],
@@ -430,17 +402,6 @@ SQL;
 			'mobile' => $is_user ? $users['etcphone'] : $param['mobile'],
 			'email' => $is_user ? $users['email'] : $param['email'],
 		);
-	}
-
-	function update_user_order_date($user_id, $date)
-	{
-		$sql = <<<SQL
-            UPDATE `user`
-               SET `orderdate` = '{$date}'
-             WHERE `adminuser` = '{$this->adminuser}'
-               AND `id` = '{$user_id}'
-SQL;
-		return query($sql, $this->localdb);
 	}
 
 	function create_add_fields($param)

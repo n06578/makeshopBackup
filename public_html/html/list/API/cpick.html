@@ -1,1 +1,149 @@
-파일 생성
+<?php
+
+require_once realpath($_SERVER['DOCUMENT_ROOT']."/../conf"). "/local.env.html";
+require_once 'conn.html';
+require_once 'mbstring.html';
+require_once 'muser.inc.html';
+require_once 'muser.func.html';
+require_once $_ENV['PATH_LIB']."/serialize_lib.html";
+
+$debug_lc = ($_SERVER['REMOTE_ADDR'] == '14.129.31.190') ? true : false;
+require_once "sellpia.inc.html";
+$shop_id    = "n06578";
+$shopinfo = get_shopinfo($shop_id);
+$ShopKey= "eec0dcabca527874b1777768ba9a68b4";
+$MakeApiLicensekey = "YmEzZmZiODkzNDNmNzhiZTQ0MmZjZGU4NTFlN2JkYzI=";
+
+$param['ordernum'] ='';
+//openApiPrcoOrderPay::handlePaid($param);
+$ApiProcess = new mycall();
+$ApiProcess->host        = $shopinfo->shopurl;
+$ApiProcess->method      = "POST";
+$ApiProcess->ssl         = false;
+$ApiProcess->script_name = "/list/open_api_process.html?mode=save&type=cpick_online_order&process=create"; // 진행중
+//$ApiProcess->script_name = "/list/open_api_process.html?mode=saved&type=sellmate_offline_order&process=create";  //test
+$ApiProcess->addHeader('Shopkey', $ShopKey);
+$ApiProcess->addHeader('Licensekey', $MakeApiLicensekey);
+
+/* test data (sellmate_offline_order)
+	//$ApiProcess->add("datas[store_id]","1");
+	//$ApiProcess->add("datas[billno]","20251106001");
+	$ApiProcess->add("datas[user_id]","n06578");
+	$ApiProcess->add("datas[total_order_price]","0");
+	$ApiProcess->add("datas[total_pay_price]","0");
+	$ApiProcess->add("datas[total_used_reserve]","0");
+
+	// 상품 정보는 baskets 배열에 담아서 전송해야 합니다.
+	$ApiProcess->add("datas[baskets][0][product_uid]","11476161");
+	$ApiProcess->add("datas[baskets][0][product_name]","API-1");
+	$ApiProcess->add("datas[baskets][0][stock]","1");
+	$ApiProcess->add("datas[baskets][0][price]","0");
+	$ApiProcess->add("datas[baskets][0][reserve]","0");
+//*/
+
+
+$ApiProcess->add("datas[user_id]",encodingUTF8("huser1"));							 // 회원아이디 o
+$ApiProcess->add("datas[order_date]",date("Ymd His"));							 // 주문 시간 o [YmdHis (20190830172852)]
+$ApiProcess->add("datas[total_order_price]","0"); 										 // 총 주문금액 o
+$ApiProcess->add("datas[total_pay_price]","0");											 // 총 결제금액 o [총 주문금액]
+$ApiProcess->add("datas[paymethod]","B");												 // 결제 방식 o [B:  현금]
+$ApiProcess->add("datas[sender]",encodingUTF8("주문자는"));							 // 주문자 o
+$ApiProcess->add("datas[phone]","111-1111-1111");										 // 연락처 o
+$ApiProcess->add("datas[mobile]","222-2222-2222");										 // 휴대폰 o
+$ApiProcess->add("datas[email]","ya@cowave.com");										 // 이메일 o
+$ApiProcess->add("datas[memo]",encodingUTF8("주문메모 api"));							 // 주문메모 o
+$ApiProcess->add("datas[post]","08501");												 // 우편번호 o
+$ApiProcess->add("datas[address]",encodingUTF8("api 서울 금천구 가산디지털2로 169-16 ")); // 주소 o
+$ApiProcess->add("datas[address2]",encodingUTF8("api 테스트 주소 (가산동)"));			 // 상세주소 o
+$ApiProcess->add("datas[deli_price]","0");									 			 // 배송비 o [0원 입력시 무료배송]
+$ApiProcess->add("datas[receiver]",encodingUTF8("수령인?"));							 // 수령인 o
+$ApiProcess->add("datas[receiver_mobile]","333-3333-3333");	 				 			 // 수령인 휴대폰 o
+$ApiProcess->add("datas[receiver_phone]","444-4444-4444");					 			 // 수령인 연락처 o
+$ApiProcess->add("datas[deli_msg]",encodingUTF8("배송메세지"));						 // 배송메세지 o
+$ApiProcess->add("datas[baskets]","baskets");								 			 // 주문 품목 정보 o
+$ApiProcess->add("datas[link_id]","cpick");								 				 //
+
+
+$ApiProcess->add("datas[baskets][0][product_uid]","11476247");				 			 // 상품코드 o [메이크샵 상품UID]
+$ApiProcess->add("datas[baskets][0][prd_option_uid]","4");  				     		 // 옵션코드 o [옵션 UID]
+$ApiProcess->add("datas[baskets][0][stock]","6");							 			 // 수량 o
+$ApiProcess->add("datas[baskets][0][price]","0");							 			 // 결제 금액 o [상품가 - 크픽할인가]
+$ApiProcess->add("datas[baskets][0][product_name]",encodingUTF8("나이키 신발"));				 			 // 상품명 o
+$ApiProcess->add("datas[baskets][0][option_name]","250");
+
+///* datas.basket */
+//$ApiProcess->add("datas[baskets][0][product_uid]","11476230");				 			 // 상품코드 o [메이크샵 상품UID]
+//$ApiProcess->add("datas[baskets][0][prd_option_uid]","4");  				     		 // 옵션코드 o [옵션 UID]
+//$ApiProcess->add("datas[baskets][0][stock]","1");							 			 // 수량 o
+//$ApiProcess->add("datas[baskets][0][price]","0");							 			 // 결제 금액 o [상품가 - 크픽할인가]
+//$ApiProcess->add("datas[baskets][0][product_name]",encodingUTF8("면바지"));				 			 // 상품명 o
+//$ApiProcess->add("datas[baskets][0][option_name]","M");						 			 // 옵션명 o
+//
+//$ApiProcess->add("datas[baskets][1][product_uid]","11476230");				 			 // 상품코드 o [메이크샵 상품UID]
+//$ApiProcess->add("datas[baskets][1][prd_option_uid]","3");  				     		 // 옵션코드 o [옵션 UID]
+//$ApiProcess->add("datas[baskets][1][stock]","2");							 			 // 수량 o
+//$ApiProcess->add("datas[baskets][1][price]","0");							 			 // 결제 금액 o [상품가 - 크픽할인가]
+//$ApiProcess->add("datas[baskets][1][product_name]",encodingUTF8("면바지"));				 			 // 상품명 o
+//$ApiProcess->add("datas[baskets][1][option_name]","S");						 			 // 옵션명 o
+//
+//$ApiProcess->add("datas[baskets][2][product_uid]","11476247");				 			 // 상품코드 o [메이크샵 상품UID]
+//$ApiProcess->add("datas[baskets][2][prd_option_uid]","3");  				     		 // 옵션코드 o [옵션 UID]
+//$ApiProcess->add("datas[baskets][2][stock]","3");							 			 // 수량 o
+//$ApiProcess->add("datas[baskets][2][price]","0");							 			 // 결제 금액 o [상품가 - 크픽할인가]
+//$ApiProcess->add("datas[baskets][2][product_name]",encodingUTF8("나이키 신발"));				 			 // 상품명 o
+//$ApiProcess->add("datas[baskets][2][option_name]","240");						 			 // 옵션명 o
+//
+//$ApiProcess->add("datas[baskets][3][product_uid]","11476247");				 			 // 상품코드 o [메이크샵 상품UID]
+//$ApiProcess->add("datas[baskets][3][prd_option_uid]","1");  				     		 // 옵션코드 o [옵션 UID]
+//$ApiProcess->add("datas[baskets][3][stock]","2");							 			 // 수량 o
+//$ApiProcess->add("datas[baskets][3][price]","0");							 			 // 결제 금액 o [상품가 - 크픽할인가]
+//$ApiProcess->add("datas[baskets][3][product_name]",encodingUTF8("나이키 신발"));				 			 // 상품명 o
+//$ApiProcess->add("datas[baskets][3][option_name]","220");						 			 // 옵션명 o
+/* cpick datas
+$ApiProcess->add("datas[user_id]",encodingUTF8("huser1"));							 // 회원아이디 o
+$ApiProcess->add("datas[order_date]",date("Ymd His"));							 // 주문 시간 o [YmdHis (20190830172852)]
+$ApiProcess->add("datas[total_order_price]","0"); 										 // 총 주문금액 o
+$ApiProcess->add("datas[total_pay_price]","0");											 // 총 결제금액 o [총 주문금액]
+$ApiProcess->add("datas[paymethod]","B");												 // 결제 방식 o [B:  현금]
+$ApiProcess->add("datas[sender]",encodingUTF8("주문자는"));							 // 주문자 o
+$ApiProcess->add("datas[phone]","111-1111-1111");										 // 연락처 o
+$ApiProcess->add("datas[mobile]","222-2222-2222");										 // 휴대폰 o
+$ApiProcess->add("datas[email]","ya@cowave.com");										 // 이메일 o
+$ApiProcess->add("datas[memo]",encodingUTF8("주문메모 api"));							 // 주문메모 o
+$ApiProcess->add("datas[post]","08501");												 // 우편번호 o
+$ApiProcess->add("datas[address]",encodingUTF8("api 서울 금천구 가산디지털2로 169-16 ")); // 주소 o
+$ApiProcess->add("datas[address2]",encodingUTF8("api 테스트 주소 (가산동)"));			 // 상세주소 o
+$ApiProcess->add("datas[deli_price]","0");									 			 // 배송비 o [0원 입력시 무료배송]
+$ApiProcess->add("datas[receiver]",encodingUTF8("수령인?"));							 // 수령인 o
+$ApiProcess->add("datas[receiver_mobile]","333-3333-3333");	 				 			 // 수령인 휴대폰 o
+$ApiProcess->add("datas[receiver_phone]","444-4444-4444");					 			 // 수령인 연락처 o
+$ApiProcess->add("datas[deli_msg]",encodingUTF8("배송메세지"));						 // 배송메세지 o
+$ApiProcess->add("datas[baskets]","baskets");								 			 // 주문 품목 정보 o
+$ApiProcess->add("datas[link_id]","cpick");								 				 // 
+
+/* datas.basket * /
+$ApiProcess->add("datas[baskets][0][product_uid]","11476230");				 			 // 상품코드 o [메이크샵 상품UID]
+$ApiProcess->add("datas[baskets][0][prd_option_uid]","4");  				     		 // 옵션코드 o [옵션 UID]
+$ApiProcess->add("datas[baskets][0][stock]","1");							 			 // 수량 o
+$ApiProcess->add("datas[baskets][0][price]","0");							 			 // 결제 금액 o [상품가 - 크픽할인가]
+$ApiProcess->add("datas[baskets][0][product_name]","API-1");				 			 // 상품명 o
+$ApiProcess->add("datas[baskets][0][option_name]","M");						 			 // 옵션명 o
+
+$ApiProcess->add("datas[baskets][1][product_uid]","11476230");				 			 // 상품코드 o [메이크샵 상품UID]
+$ApiProcess->add("datas[baskets][1][prd_option_uid]","3");  				     		 // 옵션코드 o [옵션 UID]
+$ApiProcess->add("datas[baskets][1][stock]","2");							 			 // 수량 o
+$ApiProcess->add("datas[baskets][1][price]","0");							 			 // 결제 금액 o [상품가 - 크픽할인가]
+$ApiProcess->add("datas[baskets][1][product_name]","API-1");				 			 // 상품명 o
+$ApiProcess->add("datas[baskets][1][option_name]","S");						 			 // 옵션명 o
+//*/
+
+function encodingUTF8($txt){
+	return Str::convert_encoding($txt, 'utf8', 'euckr');
+}
+$ApiProcess->exec();
+$return = json_decode($ApiProcess->get_data(), true);
+
+echo "<pre>";
+var_dump($return);
+echo "</pre>";
+?>
