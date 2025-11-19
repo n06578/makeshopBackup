@@ -1,0 +1,1227 @@
+<?php
+require_once $_ENV['PATH_LIB']."/openapi/openapi.validation.lib.html";
+require_once $_ENV['PATH_LIB']."/cart.lib.html";
+require_once $_ENV['PATH_LIB']."/product_package.lib.html";
+
+class OpenApiProcCart extends OpenApiProcess {
+    var $adminuser;
+    var $license;
+    var $datas = Array();
+    var $user_temp_id = Array();
+    var $cart_provider = Array();
+
+    function OpenApiProcCart($adminuser, $license) {
+        $this->__construct($adminuser, $license);
+    }
+
+    function __construct($adminuser, $license) {
+        $this->adminuser = $adminuser;
+        $this->license = $license;
+    }
+
+    function setDbObj($localdb, $slavedb = null) {
+        if (is_resource($slavedb)) {
+            $this->selectdb = $slavedb;
+        } else {
+            $this->selectdb = $localdb;
+        }
+        $this->localdb = $localdb;
+    }
+
+    function license() {
+        return $this->license;
+    }
+
+    function setProcess($process = 'create') { // : void
+        $this->process = $process;
+    }
+
+    function setDatas($params) { // : void
+        $this->datas = $this->encodeEuckr($params);
+    }
+
+    function datas() {
+        return $this->datas;
+    }
+
+    function commonValidate() {
+        if (!$this->datas()) {
+            return '9201';
+        }
+        if (!is_array($this->datas())) {
+            return '9204';
+        }
+        if (count($this->datas()) > 500) {
+            return '9203';
+        }
+        return true;
+    }
+
+    function postData($param) {
+        return Array(
+            'product_id'  => $param['product_id'],
+            'user_id'     => $param['user_id'],
+            'amount'      => $param['amount'],
+            'option'      => $param['option'],
+            'add_option'  => $param['option'],
+        );
+    }
+
+    function deleteValidation($param)
+    {
+        $validation = OpenapiValidation::validation($param, array(
+            'tempid'       => array('required'),
+            'product_id'   => array('numeric'),
+            'cart_id'   => array('numeric'),
+        ));
+        return $validation;
+    }
+
+    function buyValidation($param)
+    {
+        $validation = OpenapiValidation::validation($param, array(
+            'tempid'      => array('required'),
+            'user_id'     => array('required'),
+        ));
+        return $validation;
+    }
+
+    function validation($param) 
+    {
+        $validation = OpenapiValidation::validation($param, array(
+            'product_id'            => array('required'),
+            'amount'                => array('numeric'),
+            'option.*.stock_id'     => array('numeric'),
+            'option.*.amount'       => array('numeric'), 
+            'add_option.*.stock_id' => array('numeric'),
+            'add_option.*.amount'   => array('numeric'),
+			'channel_type'			=> array('string', 'min:10'),
+			'discount_price'		=> array('numeric'),
+        ));
+        if (strlen($param['user_id']) > 0) {
+            $validation = array_merge($validation, $this->userValidation($param['user_id']));
+        }
+        return array_merge($validation, $this->productValidation($param));    
+    }
+
+    function updateValidation($param)
+    {
+        $validation = OpenapiValidation::validation($param, array(
+            'product_id'            => array('required'),
+            'tempid'                => array('required'),
+            'cart_id'               => array('required'),
+            'option.*.amount'       => array('min:1'), 
+            'add_option.*.amount'   => array('min:1'), 
+        ));
+        if (!$this->checkCartProduct($param)) {
+            $validation[] = "장바구니에 존재하지 않는 상품입니다.";
+        }
+        return $validation;    
+    }
+
+    function checkCartProduct($param)
+    {
+        $add_where = $this->updateWhere($param);
+        $sql =<<<SQL
+            SELECT count(*) as `cnt`
+                FROM `cart`
+                WHERE `adminuser`='{$this->adminuser}'
+                    {$add_where}
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row['cnt'] > 0 ? true : false;
+    }
+     
+    function userValidation($user_id)
+    {
+        $result = array();
+        if ($this->inquiryUser($user_id) < 1) {
+            $result[] = '회원이 존재하지 않습니다.';
+        }
+        return $result;
+    }
+
+    function inquiryUser($user_id) {
+        $sql = <<<SQL
+            SELECT count(*) as `cnt`
+              FROM `user`
+             WHERE `adminuser` = '{$this->adminuser}'
+               AND `id` = '%s'
+SQL;
+        $res = query(sprintf($sql, mysql_real_escape_string($user_id)), $this->selectdb);
+        $row = mysql_fetch_assoc($res);
+        return $row['cnt'];
+    }
+
+    function setCartProvider($user_id, $provider)
+    {
+        if (!isset($this->cart_provider[$user_id])) {
+            $this->cart_provider[$user_id] = $provider;
+        }
+    }
+
+    function etctypes($etctype) {
+        $result = Array();
+        $etctypeArr = explode("|", $etctype);
+        if (is_array($etctypeArr)) {
+            foreach($etctypeArr as $val){
+                if (!$val) continue;
+                $etctypeExp = explode("=", $val);
+                if (strstr($val, '=')) {
+                    $result[$etctypeExp[0]] = $etctypeExp[1];
+                } else {
+                    $result[$etctypeExp[0]] = "Y";
+                }
+            }
+        }
+        return $result;
+    }
+
+    function packageProductStockCheck($product)
+    {
+        $sql =<<<SQL
+            SELECT count(`pp`.`uid`) as `cnt`
+                FROM `product_package` as `pp`
+                LEFT JOIN `product` as `p`
+                ON (`pp`.`adminuser`=`p`.`adminuser`
+                    AND `pp`.`uid`=`p`.`uid`)
+                WHERE `pp`.`adminuser`='{$this->adminuser}'
+                    AND `pp`.`pack_uid`='{$product['uid']}'
+                    AND `p`.`quantity`='0'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row['cnt'] > 0 ? false : true;
+    }
+
+    function productValidation($param)
+    {
+        $result = array();
+        $option = array();
+        $product = $this->selectProduct($param['product_id']);
+        $product_option['mandatory'] = $this->optionMandatoryList($param['product_id']);
+        $product_add_composition['mandatory'] = $this->addProductMandatoryList($param['product_id']);
+        $this->setCartProvider($param['user_id'], $product['provider']);
+        if (is_array($product) === false) {
+            $result[] = '존재하지 않는 상품 번호입니다.';
+        } else {
+            if ($product['product_type'] === 'PACKAGE') {
+                if (!$this->packageProductStockCheck($product)) {
+                    return Array('세트 상품에 품절 상품이 포함되어져 있습니다.');
+                }
+            }
+            $etctype = $this->etctypes($product['etctype']);
+            if (isset($etctype['MINIQ']) && $etctype['MINIQ'] > $param['amount']) {
+                return Array('최소 구매 수량보다 적습니다.');
+            }
+            if (isset($etctype['MAXQ']) && $etctype['MAXQ'] < $param['amount']) {
+                return Array('최대 구매 수량보다 많습니다.');
+            }
+            if ($this->cart_provider[$param['user_id']] !== $product['provider']) {
+                // return Array('공급사가 다른 상품이 포함되어 있습니다.');
+            }
+            if (is_array($param['option'])) {
+                foreach ($param['option'] as $option) {
+                    $msg = $this->optionValidation($param['product_id'], $option);
+                    if (strlen($msg) > 0) {
+                        $result[] = $msg;
+                    } else {
+                        $product_option['mandatory'][$option['option_id']] = true;
+                        if ($option['stock_id'] > 0) {
+                            $opt_ids = $this->stockOptionIdList($param['product_id'], $option['stock_id']);
+                            foreach ($opt_ids as $stock_option_id) {
+                                $product_option['mandatory'][$stock_option_id] = true;
+                            }
+                        }
+                    }
+                    if (++$product_option['exec_count'][$option['option_id']] > 1) {
+                        $result[] = "옵션값이 중복되었습니다.";
+                    }
+                }
+            }
+            if (is_array($param['add_option'])) {
+                foreach ($param['add_option'] as $option) {
+                    $msg = $this->optionValidation($param['product_id'], $option);
+                    if (strlen($msg) > 0) $result[] = $msg;
+                }
+            }
+            if (is_array($param['add_composition'])) {
+                foreach ($param['add_composition'] as $option) {
+                    $msg = $this->optionValidation($param['product_id'], $option);
+                    if (strlen($msg) > 0) $result[] = $msg;
+                    else $product_add_composition['mandatory'][$option['product_id']] = true;
+                    $add_product_option_validation = $this->productValidation($option);
+                    if (count($add_product_option_validation) > 0) {
+                        foreach ($add_product_option_validation as $text) {
+                            $result[] = "[추가구성상품] ".$text;
+                        }
+                    }
+                }
+            }
+			return $result;
+
+			if (is_array($product_option['mandatory']) && in_array(false, $product_option['mandatory'])) {
+                $result[] = "필수 옵션이 포함되지 않았습니다.";
+            }
+            if (is_array($product_add_composition['mandatory']) && in_array(false, $product_add_composition['mandatory'])) {
+                $result[] = "추가 구성 상품에서 필수 상품이 포함되지 않았습니다.";
+            }
+        }
+        return $result;
+    }
+
+    function stockOptionIdList($product_id, $stock_id)
+    {
+        $sql =<<<SQL
+                SELECT `opt_ids`
+                    FROM `product_stock`
+                    WHERE `adminuser` = '{$this->adminuser}'
+                        AND `uid` = '{$product_id}'
+                        AND `sto_id` = '{$stock_id}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return strlen($row['opt_ids']) > 0  ? explode(",", $row['opt_ids']) : array(); 
+    }
+
+    function optionValidation($product_id, $option)
+    {
+        if ($option['stock_id'] > 0) {
+            $option_info = $this->selectProductStock($product_id, $option['stock_id']);
+            if (!is_array($option_info)) {
+                return "해당 옵션이 존재하지 않습니다";   
+            }
+            if ($option_info['sto_real_stock'] < $option['amount']) {
+                return '재고 수량이 부족합니다';
+            }
+            if ($option_info['sto_stop_use'] === 'Y' && $option_info['sto_real_stock'] - $option_info['sto_stop_stock'] < 1) {
+                return '판매 중지 상품입니다.';
+            }
+        } elseif ($option['option_id'] > 0) {
+            $option_info = $this->selectProductOption($product_id, $option['option_id']);
+            if (!is_array($option_info)) {
+                return "해당 옵션이 존재하지 않습니다";   
+            }
+            if ($option_info['opt_type'] === "SELECT") {
+                $option_value = explode(",", $option_info['opt_value']); 
+                if (!in_array($option['value'], $option_value)) {
+                    return "{$option['value']} 옵션값이 존재하지 않습니다."; 
+                }
+            }
+        }
+        if ($option['product_id'] > 0) {
+            $add_composition = $this->selectProductAddComposition($product_id, $option['product_id']);
+            if (!is_array($add_composition)) {
+                return "추가 구성 상품이 존재하지 않습니다.";   
+            }
+            if ($add_composition['min_order_count'] > $option['amount']) {
+                return "추가 구성 상품의 최소 주문 수량보다 적습니다";  
+            }
+        }
+        return "";
+    }
+
+    function save() {
+        switch ($this->process) {
+            case 'create' :
+                $result = $this->handleCreate();
+                break;
+            case 'delete' :
+                $result = $this->handleDelete();
+                break;
+            case 'buy' :
+                $result = $this->handleBuy();
+                break;
+            case 'update' :
+                $result = $this->handleUpdate();
+                break;
+        }
+        return $result; 
+    }
+
+    function cartData($param)
+    {
+        $sql =<<<SQL
+            SELECT * 
+                FROM `cart`
+                    WHERE `adminuser`='{$this->adminuser}'
+                        AND `tempid`='{$param['tempid']}'
+                        AND `cart_id`='{$param['cart_id']}'
+                        AND `uid`='{$param['product_id']}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    function packageCartData($param)
+    {
+        $sql =<<<SQL
+            SELECT * 
+                FROM `cart`
+                    WHERE `adminuser`='{$this->adminuser}'
+                        AND `tempid`='{$param['tempid']}'
+                        AND `cart_type`='PACK_MAIN'
+                        AND `uid`='{$param['product_id']}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    function cartOptionData($param)
+    {
+        $result = array();
+        $sql =<<<SQL
+            SELECT * 
+                FROM `cart_option`
+                    WHERE `adminuser`='{$this->adminuser}'
+                        AND `tempid`='{$param['tempid']}'
+                        AND `cart_id`='{$param['cart_id']}'
+                        AND `uid`='{$param['product_id']}'
+SQL;
+        $res = query($sql, $this->localdb);
+        while($row = mysql_fetch_assoc($res)) {
+            $result[] = $row;
+        }
+        return $result;    
+    }
+
+    function mergeUpdateData($param, $data)
+    {
+        if (!isset($param['amount']) && isset($param['option'][0]['amount'])) $param['amount'] = $param['option'][0]['amount'];
+        $result = array(
+            'product_id' => $param['product_id'],
+            'amount' => strlen($param['amount']) > 0 ? $param['amount'] : '1',
+            'tempid' => $param['tempid'],
+            'cart_id' => $param['cart_id'],
+            'pack_uid' => $data['product']['pack_uid']
+        );
+        $option_define = $this->updateOptionDefine($param);
+        foreach ($data['option'] as $key => $option) {
+            $sort_num = strlen($option['sto_id']) > 0 ? "0_".$option['sto_id'] : $option['opt_id']."_".$option['sto_id'];
+            $result['option'][] = array(
+                'stock_id' =>   $option['sto_id'] > 0 ? $option['sto_id'] : '0',
+                'option_id' => $option['opt_id'] > 0 ? $option['opt_id'] : '0',
+                'value' => $option['opt_value'],
+                'amount' => $option_define[$sort_num],
+            );
+        }
+        return $result;
+    }
+
+    function updateOptionDefine($param)
+    {
+        $result = array();
+        $all_option = array();
+        $all_option = array_merge((array)$param['option'],(array)$param['add_option']);
+        $all_option = array_merge((array)$all_option, (array)$param['add_composition']);
+        if (is_array($all_option)) {
+            foreach ($all_option as $option) {
+                if (strlen($option['option_id']) === 0) $option['option_id'] = 0; 
+                if (strlen($option['stock_id']) === 0) {
+                    $option['stock_id'] = $this->searchOptionStockId($param['product_id'], $option);
+                } 
+                if (strlen($option['amount']) === 0) $option['amount'] = 0;
+                $option['option_id'] = strlen($option['stock_id']) > 0 ? '0' : $option['option_id'];
+                $result[$option['option_id']."_".$option['stock_id']] = $option['amount'];
+            }
+        }
+        return $result;
+    }
+
+    function handleUpdate()
+    {
+        if (is_array($this->datas)) {
+            foreach ($this->datas as $index => $info) {
+                $validation = $this->updateValidation($info);
+                if (count($validation) === 0) {
+                    $cart_info['product'] = $this->cartData($info);
+                    $cart_info['option']  = $this->cartOptionData($info);
+                    $define_data = $this->mergeUpdateData($info, $cart_info);
+                    $validation = $this->validation($define_data);
+                }
+                $result['datas'][$index] = array(
+                    'result'     => count($validation) > 0 ? false : $this->updateCart($define_data),
+                    'tempid'     => $info['tempid'],
+                    'cart_id'    => $info['cart_id'],
+                    'product_id' => $info['product_id'],
+                    'message'    => count($validation) > 0 ? $validation : '',
+                );
+            }
+            return $result;
+        }
+    }
+
+    function updateCart($param)
+    {
+        $add_where = $this->updateWhere($param);
+        $sql =<<<SQL
+            UPDATE `cart`
+                SET `amount`='{$param['amount']}'
+                WHERE `adminuser`='{$this->adminuser}'
+                    {$add_where}    
+SQL;
+        if (query($sql, $this->localdb)) {
+            if (is_array($param['option'])) {
+                $this->updateCartOption($param);
+            }
+            if (strlen($param['pack_uid']) > 0) {
+                $this->updatePackageBasket($param);
+            }
+        }
+        return true;
+    }
+    
+    function updatePackageBasket($param)
+    {
+        $sql =<<<SQL
+            UPDATE `package_basket`
+                SET `pack_amount`='{$param['amount']}'
+                WHERE `adminuser`='{$this->adminuser}'
+                    AND `tempid`='{$param['tempid']}'
+                    AND `uid`='{$param['pack_uid']}'
+SQL;
+        return query($sql, $this->localdb);
+    }
+
+    function updateCartOption($param)
+    {
+        $add_where = $this->updateWhere($param);
+        foreach ($param['option'] as $option) {
+            $opt_id_where =  "AND `sto_id`='{$option['stock_id']}' AND `opt_id`= '{$option['option_id']}'";
+            $sql =<<<SQL
+                UPDATE `cart_option`
+                    SET `opt_stock`='{$option['amount']}'
+                    WHERE `adminuser`='{$this->adminuser}'
+                        {$opt_id_where}
+                        {$add_where}     
+SQL;
+           if($option['amount'] > 0) $result = query($sql, $this->localdb);
+        }
+        return $result;  
+    }
+
+    function updateWhere($param)
+    {
+        $result = '';
+        if (strlen($param['tempid']) > 0) {
+            $result .= " AND `tempid`='{$param['tempid']}' ";
+        }
+        if (strlen($param['pack_uid']) > 0) {
+            $result .= " AND `pack_uid`='{$param['pack_uid']}' ";
+            return $result;
+        }
+        if (strlen($param['cart_id']) > 0) {
+            $result .= " AND `cart_id`='{$param['cart_id']}' ";
+        }
+        if (strlen($param['product_id']) > 0) {
+            $result .= " AND `uid`='{$param['product_id']}' ";
+        }
+        return $result;
+    }
+
+    function handleDelete()
+    {
+        $result = array();
+        if (is_array($this->datas)) {
+            foreach ($this->datas as $index => $info) {
+                $validation = $this->deleteValidation($info);
+                $result['datas'][$index] = array(
+                    'result'     => count($validation) > 0 ? false : $this->removeCart($info),
+                    'tempid'     => $info['tempid'],
+                    'cart_id'    => $info['cart_id'],
+                    'product_id' => $info['product_id'],
+                    'message'    => count($validation) > 0 ? $validation : '',
+                );
+            }
+        }
+        return $result;
+    }
+
+    function handleCreate()
+    {   
+        $result = array();
+        if (is_array($this->datas)) {
+            foreach ($this->datas as $index => $info) {
+                $validation = $this->validation($info);
+                if (count($validation) < 1 ) {
+                    $return = $this->cartStore($info, $index);
+                }
+                $result['datas'][$index] = array(
+                    'result'     => count($validation) > 0 ? false : true,
+                    'tempid'     => $return['tempid'],
+                    'user_id'    => $info['user_id'],
+                    'cart_id'    => $return['cart_id'],
+                    'product_id' => $info['product_id'],
+                    'message'    => count($validation) > 0 ? $validation : '',
+					'message2'	 => $return
+                );
+            }
+        }
+        return $result;
+    }
+
+    function createCartTemp($tempid)
+    {
+        $res = false;
+        $sql = <<<SQL
+        INSERT
+          INTO `cart_temp`
+        SELECT *
+          FROM `cart`
+         WHERE `adminuser` = '{$this->adminuser}'
+           AND `tempid`    = '{$tempid}'
+SQL;
+        if (query($sql, $this->localdb)) {
+            $sql =<<<SQL
+                INSERT 
+                INTO `cart_option_temp` 
+                SELECT * 
+                FROM `cart_option` 
+                WHERE `adminuser`  = '{$this->adminuser}' 
+                AND `tempid`     = '{$tempid}'
+SQL;
+            $res = query($sql, $this->localdb);
+        }
+        return $res;
+    }
+
+    function handleBuy()
+    {   
+        $result = array();
+        $temp_list = array();
+        if (is_array($this->datas)) {
+            foreach ($this->datas as $index => $info) {
+                $validation = array_merge($this->buyValidation($info), $this->validation($info));
+                if (count($validation) < 1 ) {
+                    if (strlen($info['tempid']) > 0 && $temp_list[$info['tempid']] !== true ) {
+                        $this->createCartTemp($info['tempid']);
+                        $this->removeCart(array('tempid'=>$info['tempid']));
+                        $temp_list[$info['tempid']] = true;
+                    }
+                    $tempid = $this->cartStore($info, $index);
+                }
+                $result['datas'][$index] = array(
+                    'result'     => count($validation) > 0 ? false : true,
+                    'tempid'     => $tempid,
+                    'user_id'    => $info['user_id'],
+                    'product_id' => $info['product_id'],
+                    'message'    => count($validation) > 0 ? $validation : '',
+                );
+            }
+        }
+        return $result;
+    }
+
+
+    function baseDefine($param)
+    {   
+        $this->setTempId($param['user_id'], $param['tempid']);    
+        $product_info = $this->selectProduct($param['product_id']);
+        return array(
+            'adminuser' => $this->adminuser,
+            'id'        => $param['user_id'],
+            'tempid'    => $this->user_temp_id[$param['user_id']],
+            'uid'       => $param['product_id'],
+            'brandcode' => $product_info['brandcode'],
+            'opt_type'  => $product_info['option_type'],
+            'product_type' => $product_info['product_type']
+        );
+    }
+
+    function packageProductCartInsert($param)
+    {
+        $return_define = $param['return_define'];
+        $cart = new Cart($this->adminuser, $return_define['tempid'], $param['product_id'], '0');
+        $package = new ProductPackage($this->adminuser, $return_define['user_id']);
+        $package->set_tempid($return_define['tempid']);
+        $package_res_id = $package->package_insert(array($param['product_id'] => array(
+            'tempid' => $return_define['tempid'],
+            'pack_amount' => $param['amount']
+        )));
+        if ($param['update'] === 'Y') {
+            $this->package_update($param);
+        }
+        $return_define['pack_uid'] = $package_res_id;
+        $return_define['package_res_id'] = $package_res_id;
+        $package_main = $return_define;
+        $package_main['uid'] = $param['product_id'];
+        $package_main['type'] = 'PACK_MAIN';
+        $packages = $this->selectProductPackage($param['product_id']);
+        if (is_array($packages)) {
+            $packages = array_merge(array($package_main), $packages);
+            $package_total_amount = $this->amountPackage($package_res_id);
+            $max_cart_id = $this->dupPackageCartId($return_define);
+            $max_cart_id = $max_cart_id > 0 ? $max_cart_id : $this->maxCartId($return_define['tempid']);
+            foreach ($packages as $package_info) {
+                $return_define['uid'] = $package_info['uid'];
+                $return_define['package_cart_id'] = $max_cart_id;
+                $return_define['cart_type'] = $package_info['type'];
+                $return_define['option_set'][0] = Array(
+                    'stock_id' => '1',
+                    'opt_sotck'   => $package_total_amount,
+                    'opt_id'   => '0'
+                );
+                $return_define['amount'] = $package_total_amount;
+//                $cart->insert($return_define);
+            }
+        }
+        return array(
+            'tempid' => $return_define['tempid'],
+			'testdata '=>$return_define,
+            'cart_id' => $max_cart_id
+        );
+    }
+
+    function dupPackageCartId($param)
+    {
+        $sql =<<<SQL
+        SELECT `cart_id`
+            FROM `cart`
+            WHERE `adminuser`='{$this->adminuser}'
+                AND `tempid`='{$param['tempid']}'
+                AND `pack_uid`='{$param['pack_uid']}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return strlen($row['cart_id']) > 0 ?  $row['cart_id'] : 0;
+    }
+
+    function package_update($param)
+    {
+        $sql =<<<SQL
+            UPDATE `package_basket`
+                SET `pack_amount`='{$param['amount']}'
+                WHERE `adminuser`='{$this->adminuser}'
+                    AND `tempid`='{$param['return_define']['tempid']}'
+                    AND `pack_uid`='{$param['product_id']}'
+SQL;
+        query($sql, $this->localdb);
+    }
+
+    function amountPackage($uid)
+    {
+        $sql =<<<SQL
+            SELECT `pack_amount`
+                FROM `package_basket`
+                WHERE `adminuser` = '{$this->adminuser}'
+                    AND `uid` = '{$uid}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row['pack_amount'];
+    }
+
+    function defineStockInput($param, $product_id) 
+    {
+        $option_info = $this->selectProductStock($product_id, $param['stock_id']);
+        return Array(
+            Array(
+                'opt_id'    => $option_info['opt_ids'],
+                'opt_value' => $option_info['opt_values'],
+                'sto_id'    => $option_info['sto_id'],
+                'opt_stock' => $param['amount'],
+            )
+        );
+    }
+
+    function defineOptionInput($param, $product_id)
+    {
+        return Array(
+            Array(
+                'opt_id'    => $param['option_id'],
+                'opt_value' => $param['value'],
+                'sto_id'    => $this->searchOptionStockId($product_id, $param),
+                'opt_stock' => $param['amount'],
+            )
+        );
+    }
+
+    function searchOptionStockId($product_id, $param)
+    {
+        $sql =<<<SQL
+                SELECT `sto_id`
+                    FROM `product_stock`
+                    WHERE `adminuser` = '{$this->adminuser}'
+                        AND `uid`='{$product_id}'
+                        AND `opt_ids`='{$param['option_id']}'
+                        AND `opt_values`='{$param['value']}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return strlen($row['sto_id']) ? $row['sto_id'] : '0';
+    }
+
+    function defineAddOptionInput($option_input_data, $param)
+    {
+        foreach ((array) $param['add_option'] as $add_option) {
+            $add_option_info = $this->selectProductStock($param['product_id'], $add_option['stock_id']);
+            $option_input_data = array_merge($option_input_data,  Array(
+                Array(
+                    'opt_id'    => $add_option_info['opt_ids'],
+                    'opt_value' => $add_option_info['opt_values'],
+                    'sto_id'    => $add_option_info['sto_id'],
+                    'opt_stock' => $add_option['amount'],
+                )
+            ));
+        }
+        return $option_input_data;
+    }
+
+    function cartOptionInserts($cart, $param)
+    {
+        if (is_array($param['option'])) {
+            foreach ($param['option'] as $stock_info) {
+                if ($stock_info['stock_id'] > 0 ) {
+                    $stock_info['amount']  += $this->amountUpdate($param, $stock_info);
+                    $option_input_data = $this->defineStockInput($stock_info, $param['product_id']);
+                    $param['return_define']['cart_id'] = $param['cart_id'];
+                } else if (strlen($stock_info['option_id']) > 0 ) {
+                    $stock_info['amount']  += $this->amountUpdate($param, $stock_info);
+                    $option_input_data = $this->defineOptionInput($stock_info, $param['product_id']);
+                    $param['return_define']['cart_id'] = $param['cart_id'];
+                } 
+                if (is_array($param['add_option'])) {
+                    $option_input_data = $this->defineAddOptionInput($option_input_data, $param);
+                    unset($param['add_option']);
+                }
+                $save_data = array_merge($param['return_define'],  array(
+                        'option_set' => $option_input_data,
+                        'amount' => $stock_info['amount'],
+                    )   
+                );
+                $cart->insert($save_data);
+            }
+        }
+    }
+    
+    function amountUpdate($param, $option)
+    {
+        if ($param['update'] === 'Y') {
+            return 0;
+        }
+        if ($option['option_id'] === '0') {
+            return $this->amount($param);
+        } 
+        return $this->optionAmount($param, $option);
+    }
+
+    function amount($param) {
+        $sql =<<<SQL
+        SELECT `amount`
+            FROM `cart`
+            WHERE `adminuser`='{$this->adminuser}'
+                AND `tempid`='{$param['return_define']['tempid']}'
+                AND `cart_id`='{$param['cart_id']}'
+                AND `uid`='{$param['product_id']}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row['amount'];
+    }
+    
+    function optionAmount($param, $option)
+    {
+        if (strlen($option['stock_id']) > 0) {
+            $add_where = "`sto_id`='{$param['stock_id']}'";
+        }
+        if (strlen($option['option_id']) > 0) {
+            $add_where = "`opt_id`='{$param['option_id']}' AND `opt_value`='{$param['value']}'";
+        }
+        $sql =<<<SQL
+            SELECT `opt_stock` as `amount`
+                FROM `cart_option`
+                WHERE `adminuser`='{$this->adminuser}'
+                    AND `tempid`='{$param['return_define']['tempid']}'
+                    AND `cart_id`='{$param['cart_id']}'
+                    AND `uid`='{$param['product_id']}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row['amount'];
+    }
+
+    function returnCartId($param)
+    {
+        if (!is_array($param['option'])) {
+            return $this->searchCartId($param);
+        }
+        return $this->searchCartIdWithOption($param);
+    }
+    
+    function searchCartId($param)
+    {        
+        $sql =<<<SQL
+            SELECT `c`.`cart_id`, count(`co`.`cart_id`) as cnt
+                FROM `cart` as `c`
+                LEFT JOIN `cart_option` as `co`
+                 ON (`c`.`adminuser`=`co`.`adminuser`
+                    AND `c`.`tempid`=`co`.`tempid`
+                    AND `c`.`uid`=`co`.`uid`
+                    AND `c`.`cart_id`=`co`.`cart_id`)
+                WHERE `c`.`adminuser`='{$this->adminuser}'
+                    AND `c`.`tempid`='{$param['return_define']['tempid']}'
+                    AND `c`.`uid`='{$param['product_id']}'
+                    AND `c`.`cart_type`='NORMAL'
+                GROUP BY `c`.`cart_id`
+SQL;
+        $res = query($sql, $this->localdb);
+        while ($row = mysql_fetch_assoc($res)) {
+            if ($row['cnt'] === '0') {
+                return $row['cart_id'];
+            }
+        }
+        return 0;
+    }
+
+    function searchCartIdWithOption($param)
+    {
+        $when_arr = array();
+        foreach ($param['option'] as $option) {
+            if (strlen($option['option_id']) > 0) {
+                $when_arr[] = " (`co`.`opt_id` = '{$option['option_id']}' AND `co`.`opt_value` = '{$option['value']}')";
+            }
+            if (strlen($option['stock_id']) > 0) {
+                $when_arr[] = " (`co`.`sto_id` = '{$option['stock_id']}')";
+
+            }
+        } // endforeach - $data['option_set']
+        $addsql_when = implode(" OR \n", $when_arr);
+
+        // 옵션이 일치하는 cart_id 조회
+        $sql = <<<SQL
+            SELECT `ca`.`cart_id`
+                 , COUNT(CASE
+                         WHEN ({$addsql_when}) THEN NULL
+                         ELSE 1
+                         END) AS `no_match_cnt`
+              FROM `cart` AS `ca`
+         LEFT JOIN `cart_option` AS `co`
+                ON `co`.`adminuser` = `ca`.`adminuser`
+               AND `co`.`tempid`    = `ca`.`tempid`
+               AND `co`.`uid`       = `ca`.`uid`
+               AND `co`.`cart_id`   = `ca`.`cart_id`
+             WHERE `ca`.`adminuser` = '{$this->adminuser}'
+               AND `ca`.`tempid`    = '{$param['return_define']['tempid']}'
+               AND `ca`.`uid`       = '{$param['product_id']}'
+               AND `ca`.`cart_type` = 'NORMAL'
+          GROUP BY `ca`.`cart_id`
+            HAVING `no_match_cnt` = 0
+             LIMIT 1
+SQL;
+        $res = query($sql, $this->localdb);
+        if ($res !== false && mysql_num_rows($res) > 0) {
+            $match_data = mysql_fetch_object($res);
+            return $match_data->cart_id;
+        }
+        return 0;
+    }
+
+    function maxCartId($tempid)
+   {
+        $sql =<<<SQL
+        SELECT max(`cart_id`)+1 as `cart_id`
+            FROM `cart`
+            WHERE `adminuser`='{$this->adminuser}'
+                AND `tempid`='{$tempid}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return strlen($row['cart_id']) > 0 ?  $row['cart_id'] : '1';
+   }
+
+    function newCartId($param)
+    {
+        $sql =<<<SQL
+            SELECT max(`cart_id`)+1 as `cart_id`
+                FROM `cart`
+                WHERE `adminuser`='{$this->adminuser}'
+                    AND `tempid`='{$param['return_define']['tempid']}'
+                    AND `uid`='{$param['product_id']}'
+SQL;
+
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return strlen($row['cart_id']) > 0 ?  $row['cart_id'] : '1';
+    }
+    
+
+
+    function cartAddCompositionInserts($param)
+    {
+        if (is_array($param['add_composition'])) {
+            $return_define = $param['return_define'];
+            foreach ($param['add_composition'] as $add_composition) {
+                $cart = new Cart($this->adminuser, $param['return_define']['tempid'], $add_composition['product_id'], '0');
+                $option_info = $this->selectProductStock($add_composition['product_id'], 1);
+                $add_composition_product_info = $this->selectProduct($add_composition['product_id']);
+                $option_input_data = Array(
+                    Array(
+                        'opt_id'    => $option_info['opt_ids'],
+                        'opt_value' => $option_info['opt_values'],
+                        'sto_id'    => $option_info['sto_id'],
+                        'opt_stock' => $add_composition['amount'],
+                    )
+                );
+                // $return_define['tempid'] = $param['tempid'];
+                $return_define['uid'] = $add_composition['product_id'];
+                $return_define['extra_uid'] = $param['product_id'];
+                $return_define['brand_code'] = $add_composition_product_info['brandcode'];
+                $save_data = array_merge($return_define,  array(
+                        'option_set' => $option_input_data,
+                        'amount' => $add_composition['amount'],
+                    )   
+                );
+                $cart->insert($save_data);
+            }
+        }
+    }
+
+    function productCartInsert($param)
+    {
+        $return_define = $param['return_define'];
+        $cart = new Cart($this->adminuser, $return_define['tempid'], $param['product_id'], '0');
+        $param['cart_id'] = $this->returnCartId($param);
+        if ($param['cart_id'] === 0) {
+            $param['cart_id'] = $this->newCartId($param);    
+        }
+        if (is_array($param['option']) === false) {
+            $param['option'][0]['option_id'] = '0';
+            $param['option'][0]['amount']   = $param['amount'];
+        }
+        $this->cartOptionInserts($cart, $param);
+        $this->cartAddCompositionInserts($param);
+        return array(
+            'tempid' => $return_define['tempid'],
+            'cart_id' => $param['cart_id']
+        );
+    }
+
+    function cartStore($param, $index)
+    {
+        $param['return_define'] = $return_define = $this->baseDefine($param);
+		return $return_define;
+        if ($return_define['product_type'] === 'PACKAGE') {
+            return $this->packageProductCartInsert($param);
+        }
+        return $this->productCartInsert($param, $index);
+    }
+
+    function removeCart($param)
+    {
+        $result = false;
+        $add_where = $this->deleteWhere($param);
+        $param['pack_uid'] = $this->packageUid($param);
+        if ($this->deleteCart($add_where)) {
+            $result = $this->deleteCartOption($add_where);
+            if (strlen($param['pack_uid']) > 0) $this->packageDelete($param);
+        }
+        return $result;
+    }
+
+    function packageDelete($param)
+    {
+        $this->cartPackageDelete($param);
+        $this->packageBasketDelete($param);
+    }
+
+    function cartPackageDelete($param)
+    {
+        $sql =<<<SQL
+            DELETE FROM `cart`
+                WHERE `adminuser`='{$this->adminuser}'
+                    AND `tempid`='{$param['tempid']}'
+                    AND `pack_uid`='{$param['pack_uid']}'
+SQL;
+        query($sql, $this->localdb);
+    }
+
+    function packageBasketDelete($param)
+    {
+        $sql =<<<SQL
+            DELETE FROM `package_basket`
+                WHERE `adminuser`='{$this->adminuser}'
+                    AND `tempid`='{$param['tempid']}'
+                    AND `uid`='{$param['pack_uid']}'
+SQL;
+        query($sql, $this->localdb);
+    }
+
+    function packageUid($param)
+    {
+       $cart_info = $this->packageCartData($param);
+       return $cart_info['pack_uid'];
+    }
+
+    function deleteCart($add_where)
+    {
+        if (strlen($add_where) === 0) {
+            return false;
+        }
+        $sql =<<<SQL
+            DELETE FROM `cart`
+            WHERE `adminuser` = '{$this->adminuser}'
+            {$add_where}
+SQL;
+        return query($sql, $this->localdb);
+    }
+
+    function deleteCartOption($add_where)
+    {
+        if (strlen($add_where) === 0) {
+            return false;
+        }
+        $sql =<<<SQL
+            DELETE FROM `cart_option`
+            WHERE `adminuser` = '{$this->adminuser}'
+            {$add_where}
+SQL;
+        return query($sql, $this->localdb);
+    }
+
+    function deleteWhere($param)
+    {
+        $return = "";
+        if (strlen($param['tempid']) > 0) {
+            $return .= " AND tempid='{$param['tempid']}' ";
+        }
+        if (strlen($param['product_id']) > 0) {
+            $return .= " AND uid='{$param['product_id']}' ";
+        }
+        if (strlen($param['cart_id']) > 0) {
+            $return .= " AND cart_id='{$param['cart_id']}' ";
+        }
+        return $return;
+    }
+
+    function selectProductPackage($uid)
+    {
+        $sql =<<<SQL
+            SELECT *
+                FROM `product_package`
+                WHERE `adminuser` = '{$this->adminuser}'
+                    AND `pack_uid` = '{$uid}'
+SQL;
+        $res = query($sql, $this->localdb);
+        while($row = mysql_fetch_assoc($res)) {
+            $row['type'] = 'PACKAGE';
+            $result[] = $row;
+        }
+        return $result;
+    }
+
+    function selectProductStock($uid, $stock_id)
+    {
+        $sql =<<<SQL
+            SELECT * 
+                FROM `product_stock`
+                WHERE `adminuser` = '{$this->adminuser}'
+                    AND `uid` = '{$uid}'
+                    AND `sto_id` = '{$stock_id}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    function selectProductOption($uid, $option_id)
+    {
+        $sql =<<<SQL
+            SELECT * 
+                FROM `product_option`
+                WHERE `adminuser` = '{$this->adminuser}'
+                    AND `uid` = '{$uid}'
+                    AND `opt_id` = '{$option_id}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    function selectProductAddComposition($main_uid, $composition_uid)
+    {
+        $sql =<<<SQL
+            SELECT * 
+                FROM `product_add_composition`
+                WHERE `adminuser` = '{$this->adminuser}'
+                    AND `main_uid` = '{$main_uid}'
+                    AND `composition_uid` = '{$composition_uid}'
+SQL;
+        $res = query($sql, $this->localdb);
+        return mysql_fetch_assoc($res);
+    }
+
+    function optionMandatoryList($uid)
+    {
+        $result = array();  
+        $sql =<<<SQL
+            SELECT * 
+                FROM `product_option`
+                WHERE `adminuser` = '{$this->adminuser}'
+                    AND `uid` = '{$uid}'
+SQL;
+        $res = query($sql, $this->localdb);
+        while ($row = mysql_fetch_assoc($res)) {
+            $result[$row['opt_id']] = $row['opt_mandatory'] === 'Y' ? false : true; 
+        }
+        return $result;
+    }
+
+    function addProductMandatoryList($uid)
+    {
+        $result = array();
+        $sql =<<<SQL
+            SELECT * 
+                FROM `product_add_composition`
+                WHERE `adminuser` = '{$this->adminuser}'
+                    AND `main_uid` = '{$uid}'
+SQL;
+        $res = query($sql, $this->localdb);
+        while ($row = mysql_fetch_assoc($res)) {
+            $result[$row['composition_uid']] = $row['extra_require'] === 'Y' ? false : true; 
+        }
+        return $result;
+    }
+
+    function setTempId($user_id, $tempid)
+    {
+        if (strlen($tempid) > 0) {
+            $this->user_temp_id[$user_id] = $tempid;
+        }
+        if (!isset($this->user_temp_id[$user_id])) {
+            if (strlen($user_id) > 0) {
+                $tempid = $this->userTempid($user_id);
+            }
+
+            require_once "{$_ENV['PATH_FUNC']}/create_tempid.func.html";
+            $this->user_temp_id[$user_id] = strlen($tempid) > 0 ? $tempid : create_tempid();
+        }
+    }
+    
+    function userTempid($user_id)
+    {
+        $enddate = date('Ymd', strtotime('-1 month')) . '0000';
+        $sql =<<<SQL
+            SELECT `tempid` 
+                FROM `cart`
+                WHERE `adminuser`='{$this->adminuser}'
+                    AND `id`='{$user_id}'
+                    AND `date_update`>'{$enddate}'
+                    ORDER BY date_update DESC LIMIT 1
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row['tempid'];
+    }
+    
+    function selectProduct($product_id)
+    {
+        $sql = <<<SQL
+            SELECT `p`.*
+            FROM `product` as `p`
+            WHERE `p`.`adminuser` = '{$this->adminuser}'
+                AND `p`.`uid` = '{$product_id}'
+SQL;
+        $res = query($sql, $this->localdb);
+        $row = mysql_fetch_assoc($res);
+        return $row;
+    }
+}
